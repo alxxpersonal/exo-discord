@@ -1,0 +1,46 @@
+# Binaries
+/exo-discord
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+*.orig
+*.rej
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.exo-discord
+
+# Build
+dist/
+
+# Research artifacts (local-only, not for public repo)
+docs/research/
+
+# Internal spec (local-only)
+SPEC.md
+
+# README placeholder - pending rewrite
+README.md
