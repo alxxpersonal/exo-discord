@@ -225,8 +225,9 @@ type restArgs struct {
 }
 
 type scaffoldArgs struct {
-	Path  string `json:"path" jsonschema:"Path to a YAML scaffold file"`
-	Apply bool   `json:"apply,omitempty" jsonschema:"Apply the plan instead of just diffing"`
+	Path         string `json:"path" jsonschema:"Path to a YAML scaffold file"`
+	Apply        bool   `json:"apply,omitempty" jsonschema:"Apply the plan instead of just diffing"`
+	DeleteExtras bool   `json:"delete_extras,omitempty" jsonschema:"Delete live roles and channels missing from the scaffold"`
 }
 
 type scaffoldResult struct {
@@ -795,10 +796,15 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 			if err != nil {
 				return nil, scaffoldResult{}, err
 			}
+			plan = scaffoldpkg.PreparePlan(plan, scaffoldpkg.ApplyOptions{
+				DeleteExtras: args.DeleteExtras,
+			})
 			return nil, scaffoldResult{Applied: false, Plan: plan}, nil
 		}
 
-		plan, err := scaffoldpkg.Apply(ctx, manager, spec)
+		plan, err := scaffoldpkg.Apply(ctx, manager, spec, scaffoldpkg.ApplyOptions{
+			DeleteExtras: args.DeleteExtras,
+		})
 		if err != nil {
 			return nil, scaffoldResult{}, err
 		}

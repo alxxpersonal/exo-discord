@@ -1,0 +1,17 @@
+{
+  "error": "apply scaffold: create channel \"general\": create channel failed; successful changes: create role \"staff\"; rollback failed: delete role \"staff\": delete role failed; guild in mixed state, manual cleanup needed",
+  "applied": {
+    "guild_id": "guild-1",
+    "changes": [
+      {
+        "action": "create",
+        "kind": "role",
+        "name": "staff"
+      }
+    ]
+  },
+  "rollback": {
+    "guild_id": "guild-1"
+  },
+  "manual_cleanup": true
+}

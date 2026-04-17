@@ -3,6 +3,7 @@ package scaffold
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,16 +14,20 @@ import (
 // --- Test Doubles ---
 
 type fakeManager struct {
-	roles          []discord.GuildRole
-	channels       []discord.GuildChannel
-	roleCreates    []discord.RoleCreateRequest
-	roleUpdates    []discord.RoleUpdateRequest
-	roleDeletes    []discord.RoleDeleteRequest
-	channelCreates []discord.ChannelCreateRequest
-	channelUpdates []discord.ChannelUpdateRequest
-	channelDeletes []string
-	permSets       []discord.ChannelPermissionSetRequest
-	permRemoves    []discord.ChannelPermissionRemoveRequest
+	roleListCalls         int
+	channelListCalls      int
+	roles                 []discord.GuildRole
+	channels              []discord.GuildChannel
+	roleCreates           []discord.RoleCreateRequest
+	roleUpdates           []discord.RoleUpdateRequest
+	roleDeletes           []discord.RoleDeleteRequest
+	channelCreates        []discord.ChannelCreateRequest
+	channelUpdates        []discord.ChannelUpdateRequest
+	channelDeletes        []string
+	permSets              []discord.ChannelPermissionSetRequest
+	permRemoves           []discord.ChannelPermissionRemoveRequest
+	failCreateChannelName string
+	failDeleteRoleID      string
 }
 
 func (f *fakeManager) Open(context.Context) error  { return nil }
@@ -35,9 +40,11 @@ func (f *fakeManager) GetGuild(context.Context, string) (discord.GuildInfo, erro
 	return discord.GuildInfo{}, nil
 }
 func (f *fakeManager) ListChannels(context.Context, string) ([]discord.GuildChannel, error) {
+	f.channelListCalls++
 	return f.channels, nil
 }
 func (f *fakeManager) ListRoles(context.Context, string) ([]discord.GuildRole, error) {
+	f.roleListCalls++
 	return f.roles, nil
 }
 func (f *fakeManager) ListMembers(context.Context, discord.ListMembersRequest) ([]discord.GuildMember, error) {
@@ -47,6 +54,9 @@ func (f *fakeManager) GetMember(context.Context, discord.GetMemberRequest) (disc
 	return discord.GuildMember{}, nil
 }
 func (f *fakeManager) CreateChannel(_ context.Context, req discord.ChannelCreateRequest) (discord.GuildChannel, error) {
+	if req.Name == f.failCreateChannelName {
+		return discord.GuildChannel{}, errors.New("create channel failed")
+	}
 	f.channelCreates = append(f.channelCreates, req)
 	channel := discord.GuildChannel{ID: "created-" + req.Name, GuildID: req.GuildID, Name: req.Name, Type: req.Type, ParentID: req.ParentID, Topic: req.Topic}
 	f.channels = append(f.channels, channel)
@@ -54,7 +64,17 @@ func (f *fakeManager) CreateChannel(_ context.Context, req discord.ChannelCreate
 }
 func (f *fakeManager) UpdateChannel(_ context.Context, req discord.ChannelUpdateRequest) (discord.GuildChannel, error) {
 	f.channelUpdates = append(f.channelUpdates, req)
-	return discord.GuildChannel{ID: req.ID, Name: req.ID, Type: "text"}, nil
+	channel := discord.GuildChannel{ID: req.ID, Type: "text"}
+	if req.Name != nil {
+		channel.Name = *req.Name
+	}
+	if req.Topic != nil {
+		channel.Topic = *req.Topic
+	}
+	if req.ParentID != nil {
+		channel.ParentID = *req.ParentID
+	}
+	return channel, nil
 }
 func (f *fakeManager) DeleteChannel(_ context.Context, channelID string) error {
 	f.channelDeletes = append(f.channelDeletes, channelID)
@@ -76,9 +96,25 @@ func (f *fakeManager) CreateRole(_ context.Context, req discord.RoleCreateReques
 }
 func (f *fakeManager) UpdateRole(_ context.Context, req discord.RoleUpdateRequest) (discord.GuildRole, error) {
 	f.roleUpdates = append(f.roleUpdates, req)
-	return discord.GuildRole{ID: req.RoleID, Name: req.RoleID}, nil
+	role := discord.GuildRole{ID: req.RoleID, GuildID: req.GuildID}
+	if req.Name != nil {
+		role.Name = *req.Name
+	}
+	if req.Color != nil {
+		role.Color = *req.Color
+	}
+	if req.Hoist != nil {
+		role.Hoist = *req.Hoist
+	}
+	if req.Mentionable != nil {
+		role.Mentionable = *req.Mentionable
+	}
+	return role, nil
 }
 func (f *fakeManager) DeleteRole(_ context.Context, req discord.RoleDeleteRequest) error {
+	if req.RoleID == f.failDeleteRoleID {
+		return errors.New("delete role failed")
+	}
 	f.roleDeletes = append(f.roleDeletes, req)
 	return nil
 }
@@ -207,12 +243,15 @@ func TestApplyUsesManagerMutations(t *testing.T) {
 		},
 	}
 
-	plan, err := Apply(context.Background(), manager, spec)
+	plan, err := Apply(context.Background(), manager, spec, ApplyOptions{DeleteExtras: true})
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	if plan.GuildID != "guild-1" {
 		t.Fatalf("plan = %#v", plan)
+	}
+	if manager.roleListCalls != 1 || manager.channelListCalls != 1 {
+		t.Fatalf("load calls = roles:%d channels:%d", manager.roleListCalls, manager.channelListCalls)
 	}
 	if len(manager.roleCreates) != 1 || manager.roleCreates[0].Name != "staff" {
 		t.Fatalf("roleCreates = %#v", manager.roleCreates)
@@ -231,5 +270,98 @@ func TestApplyUsesManagerMutations(t *testing.T) {
 	}
 	if len(manager.roleDeletes) == 0 || manager.roleDeletes[0].RoleID != "role-2" {
 		t.Fatalf("roleDeletes = %#v", manager.roleDeletes)
+	}
+	if len(plan.Changes) != 7 {
+		t.Fatalf("plan.Changes = %#v", plan.Changes)
+	}
+}
+
+func TestApplyKeepsExtrasWithoutDeleteExtras(t *testing.T) {
+	t.Parallel()
+
+	manager := &fakeManager{
+		roles: []discord.GuildRole{
+			{ID: "role-1", Name: "admin", Color: 0},
+			{ID: "role-2", Name: "obsolete"},
+		},
+		channels: []discord.GuildChannel{
+			{ID: "chan-1", Name: "obsolete", Type: "text"},
+		},
+	}
+
+	spec := Spec{
+		Guild: GuildSpec{ID: "guild-1"},
+		Roles: []RoleSpec{
+			{Name: "admin", Color: "#112233"},
+		},
+	}
+
+	plan, err := Apply(context.Background(), manager, spec, ApplyOptions{})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if len(manager.channelDeletes) != 0 {
+		t.Fatalf("channelDeletes = %#v", manager.channelDeletes)
+	}
+	if len(manager.roleDeletes) != 0 {
+		t.Fatalf("roleDeletes = %#v", manager.roleDeletes)
+	}
+	if len(plan.Warnings) != 2 {
+		t.Fatalf("plan.Warnings = %#v", plan.Warnings)
+	}
+	if plan.Changes[len(plan.Changes)-1].Action == "delete" {
+		t.Fatalf("plan.Changes = %#v", plan.Changes)
+	}
+}
+
+func TestApplyRollbackFailureMatchesGolden(t *testing.T) {
+	manager := &fakeManager{
+		failCreateChannelName: "general",
+		failDeleteRoleID:      "created-staff",
+	}
+
+	spec := Spec{
+		Guild: GuildSpec{ID: "guild-1"},
+		Roles: []RoleSpec{
+			{Name: "staff"},
+		},
+		Channels: []ChannelSpec{
+			{Name: "general", Type: "text"},
+		},
+	}
+
+	plan, err := Apply(context.Background(), manager, spec, ApplyOptions{})
+	if err == nil {
+		t.Fatal("Apply() error = nil, want failure")
+	}
+
+	var applyErr *ApplyError
+	if !errors.As(err, &applyErr) {
+		t.Fatalf("Apply() error = %T, want *ApplyError", err)
+	}
+
+	got, marshalErr := json.MarshalIndent(struct {
+		Error         string `json:"error"`
+		Applied       Plan   `json:"applied"`
+		Rollback      Plan   `json:"rollback"`
+		ManualCleanup bool   `json:"manual_cleanup"`
+	}{
+		Error:         err.Error(),
+		Applied:       plan,
+		Rollback:      applyErr.Rollback,
+		ManualCleanup: applyErr.ManualCleanup,
+	}, "", "  ")
+	if marshalErr != nil {
+		t.Fatalf("MarshalIndent() error = %v", marshalErr)
+	}
+	got = append(got, '\n')
+
+	want, readErr := os.ReadFile(filepath.Join("testdata", "apply_failure.golden.json"))
+	if readErr != nil {
+		t.Fatalf("ReadFile() error = %v", readErr)
+	}
+
+	if string(got) != string(want) {
+		t.Fatalf("golden mismatch\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }

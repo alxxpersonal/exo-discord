@@ -12,9 +12,10 @@ import (
 
 func newScaffoldCommand(env Environment) *cobra.Command {
 	var (
-		from  string
-		apply bool
-		yes   bool
+		from         string
+		apply        bool
+		deleteExtras bool
+		yes          bool
 	)
 
 	cmd := &cobra.Command{
@@ -32,6 +33,9 @@ func newScaffoldCommand(env Environment) *cobra.Command {
 					if err != nil {
 						return err
 					}
+					plan = scaffoldpkg.PreparePlan(plan, scaffoldpkg.ApplyOptions{
+						DeleteExtras: deleteExtras,
+					})
 					return writeJSON(cmd.OutOrStdout(), plan)
 				}
 
@@ -39,7 +43,9 @@ func newScaffoldCommand(env Environment) *cobra.Command {
 					return err
 				}
 
-				plan, err := scaffoldpkg.Apply(ctx, manager, spec)
+				plan, err := scaffoldpkg.Apply(ctx, manager, spec, scaffoldpkg.ApplyOptions{
+					DeleteExtras: deleteExtras,
+				})
 				if err != nil {
 					return err
 				}
@@ -54,6 +60,7 @@ func newScaffoldCommand(env Environment) *cobra.Command {
 
 	cmd.Flags().StringVar(&from, "from", "", "path to scaffold yaml file")
 	cmd.Flags().BoolVar(&apply, "apply", false, "apply the scaffold delta")
+	cmd.Flags().BoolVar(&deleteExtras, "delete-extras", false, "delete live roles and channels that are missing from the scaffold")
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm scaffold apply")
 	markRequired(cmd, "from")
 	return cmd

@@ -20,8 +20,9 @@ type State struct {
 
 // Plan stores the scaffold delta plan.
 type Plan struct {
-	GuildID string   `json:"guild_id"`
-	Changes []Change `json:"changes,omitempty"`
+	GuildID  string   `json:"guild_id"`
+	Changes  []Change `json:"changes,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Change stores a single planned mutation.
