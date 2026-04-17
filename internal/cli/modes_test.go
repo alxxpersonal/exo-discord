@@ -63,7 +63,7 @@ func TestDefaultListenRunner(t *testing.T) {
 		done <- defaultListenRunner{}.Run(ctx, request)
 	}()
 
-	waitForCondition(t, func() bool { return session.openCount == 1 })
+	waitForCondition(t, func() bool { return session.OpenCount() == 1 })
 	session.emit(context.Background(), discordpkg.Message{
 		ID:          "msg-1",
 		ChannelID:   "chan-1",
@@ -79,8 +79,8 @@ func TestDefaultListenRunner(t *testing.T) {
 	if !strings.Contains(stdout.String(), `"source":"discord"`) {
 		t.Fatalf("stdout = %q, want envelope json", stdout.String())
 	}
-	if session.closeCount != 1 {
-		t.Fatalf("close count = %d, want 1", session.closeCount)
+	if got := session.CloseCount(); got != 1 {
+		t.Fatalf("close count = %d, want 1", got)
 	}
 }
 
@@ -119,7 +119,7 @@ func TestDefaultBotModeRunner(t *testing.T) {
 		done <- defaultBotModeRunner{}.Run(ctx, request)
 	}()
 
-	waitForCondition(t, func() bool { return session.openCount == 1 })
+	waitForCondition(t, func() bool { return session.OpenCount() == 1 })
 	session.emit(context.Background(), discordpkg.Message{
 		ID:           "msg-1",
 		ChannelID:    "chan-1",
@@ -128,18 +128,18 @@ func TestDefaultBotModeRunner(t *testing.T) {
 		AuthorID:     "user-1",
 		MentionedBot: true,
 	})
-	waitForCondition(t, func() bool { return session.replyRequest.Text == "ready" })
+	waitForCondition(t, func() bool { return session.ReplyRequest().Text == "ready" })
 	cancel()
 
 	err := <-done
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if session.statusRequest.Presence != "online" {
-		t.Fatalf("Presence = %q, want online", session.statusRequest.Presence)
+	if got := session.StatusRequest().Presence; got != "online" {
+		t.Fatalf("Presence = %q, want online", got)
 	}
-	if session.replyRequest.Text != "ready" {
-		t.Fatalf("reply text = %q, want ready", session.replyRequest.Text)
+	if got := session.ReplyRequest().Text; got != "ready" {
+		t.Fatalf("reply text = %q, want ready", got)
 	}
 }
 

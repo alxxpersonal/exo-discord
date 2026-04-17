@@ -32,6 +32,7 @@ Thumbs.db
 .env
 .env.local
 .exo-discord
+.claude/worktrees/
 
 # Build
 dist/

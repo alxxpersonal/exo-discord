@@ -104,8 +104,9 @@ func TestSendReplyAndEditCommands(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute(reply) error = %v", err)
 	}
-	if session.replyRequest.GuildID != "guild-1" || session.replyRequest.ReplyToMessageID != "msg-1" {
-		t.Fatalf("reply request = %#v", session.replyRequest)
+	replyRequest := session.ReplyRequest()
+	if replyRequest.GuildID != "guild-1" || replyRequest.ReplyToMessageID != "msg-1" {
+		t.Fatalf("reply request = %#v", replyRequest)
 	}
 
 	env.Stdout.(*bytes.Buffer).Reset()
@@ -114,8 +115,9 @@ func TestSendReplyAndEditCommands(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute(edit) error = %v", err)
 	}
-	if session.editRequest.MessageID != "msg-1" || session.editRequest.Text != "edited" {
-		t.Fatalf("edit request = %#v", session.editRequest)
+	editRequest := session.EditRequest()
+	if editRequest.MessageID != "msg-1" || editRequest.Text != "edited" {
+		t.Fatalf("edit request = %#v", editRequest)
 	}
 }
 

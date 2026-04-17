@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
@@ -37,6 +38,7 @@ type Client interface {
 type DiscordGoClient struct {
 	session    *discordgo.Session
 	httpClient *http.Client
+	mu         sync.RWMutex
 	botUserID  string
 }
 
@@ -59,9 +61,11 @@ func NewDiscordGoClient(token string, intents discordgo.Intent) (*DiscordGoClien
 		},
 	}
 
-	session.AddHandler(func(s *discordgo.Session, _ *discordgo.Ready) {
-		if s.State != nil && s.State.User != nil {
-			client.botUserID = s.State.User.ID
+	session.AddHandler(func(_ *discordgo.Session, ready *discordgo.Ready) {
+		if ready != nil && ready.User != nil {
+			client.mu.Lock()
+			client.botUserID = ready.User.ID
+			client.mu.Unlock()
 		}
 	})
 
@@ -82,13 +86,9 @@ func (c *DiscordGoClient) Close() error {
 
 // BotUserID returns the current bot user id.
 func (c *DiscordGoClient) BotUserID() string {
-	if c.botUserID != "" {
-		return c.botUserID
-	}
-	if c.session.State != nil && c.session.State.User != nil {
-		return c.session.State.User.ID
-	}
-	return ""
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.botUserID
 }
 
 // OnMessageCreate registers a raw message handler.

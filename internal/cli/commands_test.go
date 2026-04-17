@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 // --- Test Doubles ---
 
 type fakeSession struct {
+	mu             sync.RWMutex
 	openCount      int
 	closeCount     int
 	sendRequest    discordpkg.SendRequest
@@ -32,11 +34,15 @@ type fakeSession struct {
 }
 
 func (f *fakeSession) Open(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.openCount++
 	return nil
 }
 
 func (f *fakeSession) Close(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closeCount++
 	return nil
 }
@@ -46,51 +52,114 @@ func (f *fakeSession) Mode() string {
 }
 
 func (f *fakeSession) SendMessage(_ context.Context, req discordpkg.SendRequest) (discordpkg.SentMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sendRequest = req
 	return discordpkg.SentMessage{ChannelID: req.ChannelID, MessageID: "msg-send"}, nil
 }
 
 func (f *fakeSession) Reply(_ context.Context, req discordpkg.ReplyRequest) (discordpkg.SentMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.replyRequest = req
 	return discordpkg.SentMessage{ChannelID: req.ChannelID, MessageID: "msg-reply"}, nil
 }
 
 func (f *fakeSession) React(_ context.Context, req discordpkg.ReactRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.reactRequest = req
 	return nil
 }
 
 func (f *fakeSession) EditMessage(_ context.Context, req discordpkg.EditRequest) (discordpkg.SentMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.editRequest = req
 	return discordpkg.SentMessage{ChannelID: req.ChannelID, MessageID: req.MessageID}, nil
 }
 
 func (f *fakeSession) FetchHistory(_ context.Context, req discordpkg.HistoryRequest) ([]discordpkg.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.historyRequest = req
 	return nil, nil
 }
 
 func (f *fakeSession) DownloadAttachments(_ context.Context, req discordpkg.DownloadRequest) ([]discordpkg.DownloadedFile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.downloadReq = req
 	return nil, nil
 }
 
 func (f *fakeSession) SetStatus(_ context.Context, req discordpkg.StatusRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.statusRequest = req
 	return nil
 }
 
 func (f *fakeSession) Subscribe(handler discordpkg.InboundHandler) func() {
+	f.mu.Lock()
 	f.handler = handler
+	f.mu.Unlock()
 	return func() {
+		f.mu.Lock()
 		f.handler = nil
+		f.mu.Unlock()
 	}
 }
 
 func (f *fakeSession) emit(ctx context.Context, message discordpkg.Message) {
-	if f.handler != nil {
-		f.handler(ctx, message)
+	f.mu.RLock()
+	handler := f.handler
+	f.mu.RUnlock()
+	if handler != nil {
+		handler(ctx, message)
 	}
+}
+
+func (f *fakeSession) OpenCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.openCount
+}
+
+func (f *fakeSession) CloseCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.closeCount
+}
+
+func (f *fakeSession) SendRequest() discordpkg.SendRequest {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.sendRequest
+}
+
+func (f *fakeSession) ReplyRequest() discordpkg.ReplyRequest {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.replyRequest
+}
+
+func (f *fakeSession) ReactRequest() discordpkg.ReactRequest {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.reactRequest
+}
+
+func (f *fakeSession) EditRequest() discordpkg.EditRequest {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.editRequest
+}
+
+func (f *fakeSession) StatusRequest() discordpkg.StatusRequest {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.statusRequest
 }
 
 type fakeMCPServer struct {
@@ -239,8 +308,9 @@ func TestSendCommandUsesSessionFactory(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if session.sendRequest.ChannelID != "chan-1" || session.sendRequest.Text != "hello" {
-		t.Fatalf("send request = %#v", session.sendRequest)
+	sendRequest := session.SendRequest()
+	if sendRequest.ChannelID != "chan-1" || sendRequest.Text != "hello" {
+		t.Fatalf("send request = %#v", sendRequest)
 	}
 
 	var result sendResult
@@ -275,8 +345,9 @@ func TestSendReactCommandUsesSessionFactory(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if session.reactRequest.MessageID != "msg-1" || session.reactRequest.Emoji != "👍" {
-		t.Fatalf("react request = %#v", session.reactRequest)
+	reactRequest := session.ReactRequest()
+	if reactRequest.MessageID != "msg-1" || reactRequest.Emoji != "👍" {
+		t.Fatalf("react request = %#v", reactRequest)
 	}
 }
 
@@ -433,8 +504,10 @@ func TestMCPServeCommandOpensSessionAndRunsServer(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if session.openCount != 1 || session.closeCount != 1 {
-		t.Fatalf("session open=%d close=%d, want 1/1", session.openCount, session.closeCount)
+	openCount := session.OpenCount()
+	closeCount := session.CloseCount()
+	if openCount != 1 || closeCount != 1 {
+		t.Fatalf("session open=%d close=%d, want 1/1", openCount, closeCount)
 	}
 	if server.runCount != 1 {
 		t.Fatalf("server run count = %d, want 1", server.runCount)
