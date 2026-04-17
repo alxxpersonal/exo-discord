@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // --- Test Cases ---
@@ -70,6 +72,79 @@ func TestWatcherReportsConfigAndStateDirChanges(t *testing.T) {
 	stateEvent = waitForWatchEvent(t, watcher.Events())
 	if stateEvent.Source != ReloadSourceState {
 		t.Fatalf("state recreate event source = %q, want state", stateEvent.Source)
+	}
+}
+
+func TestWatcherMergesConfigAndStateChangesWithinDebounceWindow(t *testing.T) {
+	t.Parallel()
+
+	fixture := newHotReloadFixture(t)
+	watcher, err := NewWatcher(fixture.configPath, fixture.statePath)
+	if err != nil {
+		t.Fatalf("NewWatcher() error = %v", err)
+	}
+	defer func() {
+		_ = watcher.Close()
+	}()
+
+	state := DefaultState()
+	state.ApprovedUsers["user-1"] = ApprovedUser{
+		ApprovedAt: time.Now().UTC(),
+		Source:     "pairing",
+	}
+
+	writeHotReloadConfig(t, fixture.configPath, hotReloadConfigBody("user-1"))
+	if err := SaveState(fixture.statePath, state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	event := waitForWatchEvent(t, watcher.Events())
+	if event.Source != ReloadSourceBoth {
+		t.Fatalf("event source = %q, want both", event.Source)
+	}
+}
+
+func TestWatcherHandleStateDirEventReportsUnavailableDirectory(t *testing.T) {
+	t.Parallel()
+
+	fixture := newHotReloadFixture(t)
+	watcher, err := NewWatcher(fixture.configPath, fixture.statePath)
+	if err != nil {
+		t.Fatalf("NewWatcher() error = %v", err)
+	}
+	defer func() {
+		_ = watcher.Close()
+	}()
+
+	err = watcher.handleStateDirEvent(fsnotify.Event{
+		Name: watcher.stateDir,
+		Op:   fsnotify.Remove,
+	})
+	if err == nil {
+		t.Fatal("handleStateDirEvent() error = nil, want unavailable error")
+	}
+	if got, want := err.Error(), "watch access state dir: "+watcher.stateDir+" unavailable"; got != want {
+		t.Fatalf("handleStateDirEvent() error = %q, want %q", got, want)
+	}
+}
+
+func TestWatcherHandleStateDirEventIgnoresIrrelevantOps(t *testing.T) {
+	t.Parallel()
+
+	fixture := newHotReloadFixture(t)
+	watcher, err := NewWatcher(fixture.configPath, fixture.statePath)
+	if err != nil {
+		t.Fatalf("NewWatcher() error = %v", err)
+	}
+	defer func() {
+		_ = watcher.Close()
+	}()
+
+	if err := watcher.handleStateDirEvent(fsnotify.Event{
+		Name: watcher.stateDir,
+		Op:   fsnotify.Chmod,
+	}); err != nil {
+		t.Fatalf("handleStateDirEvent() error = %v, want nil", err)
 	}
 }
 

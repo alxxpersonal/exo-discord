@@ -83,6 +83,7 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				return ignoreContextError(err)
 			}
 
+			// access evaluator, distinct from discord.Manager above for MCP tool calls.
 			accessManager, err := access.NewManager(resolved.AccessStatePath, accessPolicyFromConfig(resolved.Config))
 			if err != nil {
 				stopService()
@@ -90,7 +91,9 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				return err
 			}
 
-			if err := accessManager.StartAutoReload(serviceCtx, resolved.ConfigPath, logger); err != nil {
+			auditor := audit.NewLogger(resolved.AuditLogPath)
+			accessManager.SetLogger(logger)
+			if err := accessManager.StartAutoReload(serviceCtx, resolved.ConfigPath, auditor); err != nil {
 				stopService()
 				stopServer()
 				return err
@@ -108,7 +111,7 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				session,
 				accessManager,
 				dispatchHook,
-				audit.NewLogger(resolved.AuditLogPath),
+				auditor,
 				logger,
 				resolved.Config.Hook.Timeout.Duration(),
 				statusRequestFromConfig(resolved.Config.Status),

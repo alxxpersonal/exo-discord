@@ -41,6 +41,11 @@ func AccessStatePath(homeDir string) string {
 	return filepath.Join(HomeStateDir(homeDir), accessStateName)
 }
 
+// HomeDirFromAccessStatePath returns the home directory for an access state path.
+func HomeDirFromAccessStatePath(statePath string) string {
+	return filepath.Dir(filepath.Dir(filepath.Clean(statePath)))
+}
+
 // AuditLogPath returns the audit log path.
 func AuditLogPath(homeDir string) string {
 	return filepath.Join(HomeStateDir(homeDir), auditLogName)

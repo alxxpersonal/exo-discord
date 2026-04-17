@@ -26,6 +26,7 @@ type Record struct {
 	MessageID  string            `json:"message_id,omitempty"`
 	UserID     string            `json:"user_id,omitempty"`
 	Decision   string            `json:"decision,omitempty"`
+	Source     string            `json:"source,omitempty"`
 	DurationMS int64             `json:"duration_ms,omitempty"`
 	Error      string            `json:"error,omitempty"`
 	Fields     map[string]string `json:"fields,omitempty"`
@@ -168,6 +169,7 @@ func (r Record) redacted() Record {
 	r.MessageID = redact.String(r.MessageID)
 	r.UserID = redact.String(r.UserID)
 	r.Decision = redact.String(r.Decision)
+	r.Source = redact.String(r.Source)
 	r.Error = redact.String(r.Error)
 
 	if len(r.Fields) == 0 {

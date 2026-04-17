@@ -2,7 +2,6 @@ package access
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"github.com/alxxpersonal/exo-discord/internal/config"
 )
@@ -10,8 +9,7 @@ import (
 // --- Load Helpers ---
 
 func loadPolicy(configPath string, statePath string) (Policy, error) {
-	homeDir := filepath.Dir(filepath.Dir(filepath.Clean(statePath)))
-	resolved, err := config.LoadResolvedPath(configPath, homeDir)
+	resolved, err := config.LoadResolvedPath(configPath, config.HomeDirFromAccessStatePath(statePath))
 	if err != nil {
 		return Policy{}, fmt.Errorf("load config %s: %w", configPath, err)
 	}

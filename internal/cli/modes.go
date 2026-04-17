@@ -49,7 +49,9 @@ func (defaultBotModeRunner) Run(ctx context.Context, req botModeRequest) error {
 	}
 
 	logger := newLogger(req.Config.Config.Logging, req.Stderr)
-	if err := manager.StartAutoReload(ctx, req.Config.ConfigPath, logger); err != nil {
+	auditor := audit.NewLogger(req.Config.AuditLogPath)
+	manager.SetLogger(logger)
+	if err := manager.StartAutoReload(ctx, req.Config.ConfigPath, auditor); err != nil {
 		return err
 	}
 
@@ -62,7 +64,7 @@ func (defaultBotModeRunner) Run(ctx context.Context, req botModeRequest) error {
 		req.Session,
 		manager,
 		hookClient,
-		audit.NewLogger(req.Config.AuditLogPath),
+		auditor,
 		logger,
 		req.Config.Config.Hook.Timeout.Duration(),
 		statusRequestFromConfig(req.Config.Config.Status),

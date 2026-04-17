@@ -23,12 +23,20 @@ type ReloadSource string
 const (
 	ReloadSourceConfig ReloadSource = "config"
 	ReloadSourceState  ReloadSource = "state"
+	ReloadSourceBoth   ReloadSource = "both"
 )
 
 // WatchEvent reports a debounced access reload trigger.
 type WatchEvent struct {
 	Source ReloadSource
 }
+
+type reloadSourceSet uint8
+
+const (
+	reloadSourceConfigBit reloadSourceSet = 1 << iota
+	reloadSourceStateBit
+)
 
 // Watcher observes config and access-state filesystem changes.
 type Watcher struct {
@@ -65,7 +73,7 @@ func NewWatcher(policyPath string, statePath string) (*Watcher, error) {
 		statePath:  stateFilePath,
 		stateDir:   filepath.Dir(stateFilePath),
 		stateRoot:  filepath.Dir(filepath.Dir(stateFilePath)),
-		events:     make(chan WatchEvent, 1),
+		events:     make(chan WatchEvent, 4),
 		errors:     make(chan error, 1),
 		done:       make(chan struct{}),
 	}
@@ -111,9 +119,9 @@ func (w *Watcher) run() {
 	defer close(w.errors)
 
 	var (
-		timer         *time.Timer
-		timerCh       <-chan time.Time
-		pendingSource ReloadSource
+		timer          *time.Timer
+		timerCh        <-chan time.Time
+		pendingSources reloadSourceSet
 	)
 
 	for {
@@ -131,7 +139,7 @@ func (w *Watcher) run() {
 				continue
 			}
 
-			pendingSource = source
+			pendingSources |= reloadSourceMask(source)
 			if timer == nil {
 				timer = time.NewTimer(watcherDebounceWindow)
 				timerCh = timer.C
@@ -152,13 +160,13 @@ func (w *Watcher) run() {
 			w.publishError(fmt.Errorf("watch access files: %w", err))
 		case <-timerCh:
 			select {
-			case w.events <- WatchEvent{Source: pendingSource}:
+			case w.events <- WatchEvent{Source: reloadSourceFromMask(pendingSources)}:
 			default:
 			}
 
 			timerCh = nil
 			timer = nil
-			pendingSource = ""
+			pendingSources = 0
 		}
 	}
 }
@@ -184,7 +192,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) (ReloadSource, bool, error) 
 
 func (w *Watcher) handleStateDirEvent(event fsnotify.Event) error {
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-		return fmt.Errorf("access state dir is unavailable: %s", w.stateDir)
+		return fmt.Errorf("watch access state dir: %s unavailable", w.stateDir)
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) == 0 {
 		return nil
@@ -214,6 +222,30 @@ func (w *Watcher) publishError(err error) {
 	select {
 	case w.errors <- err:
 	default:
+	}
+}
+
+func reloadSourceMask(source ReloadSource) reloadSourceSet {
+	switch source {
+	case ReloadSourceConfig:
+		return reloadSourceConfigBit
+	case ReloadSourceState:
+		return reloadSourceStateBit
+	default:
+		return 0
+	}
+}
+
+func reloadSourceFromMask(mask reloadSourceSet) ReloadSource {
+	switch mask {
+	case reloadSourceConfigBit:
+		return ReloadSourceConfig
+	case reloadSourceStateBit:
+		return ReloadSourceState
+	case reloadSourceConfigBit | reloadSourceStateBit:
+		return ReloadSourceBoth
+	default:
+		return ""
 	}
 }
 

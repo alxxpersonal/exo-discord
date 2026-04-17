@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/audit"
-	"github.com/alxxpersonal/exo-discord/internal/config"
 )
 
 // --- Types ---
@@ -26,7 +25,7 @@ type Manager struct {
 	configPath string
 	watcher    *Watcher
 	logger     *slog.Logger
-	auditor    interface{ Write(audit.Record) error }
+	auditor    *audit.Logger
 	now        func() time.Time
 	newCode    func() (string, error)
 }
@@ -54,6 +53,17 @@ func NewManager(statePath string, policy Policy) (*Manager, error) {
 	return manager, nil
 }
 
+// SetLogger updates the logger used for access reload warnings and errors.
+func (m *Manager) SetLogger(logger *slog.Logger) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	m.logger = logger
+}
+
 // --- Decisions ---
 
 // ReloadPolicy reloads the config-backed policy and persisted access state.
@@ -62,13 +72,16 @@ func (m *Manager) ReloadPolicy(ctx context.Context) error {
 }
 
 // StartAutoReload starts a background watcher that reloads policy and state on disk changes.
-func (m *Manager) StartAutoReload(ctx context.Context, configPath string, logger *slog.Logger) error {
+func (m *Manager) StartAutoReload(ctx context.Context, configPath string, auditor *audit.Logger) error {
+	configPath = filepath.Clean(configPath)
 	if err := ctx.Err(); err != nil {
+		m.logger.Debug(
+			"access auto-reload not started because context is already canceled",
+			"component", "access",
+			"config_path", configPath,
+			"state_path", m.statePath,
+		)
 		return nil
-	}
-
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	watcher, err := NewWatcher(configPath, m.statePath)
@@ -82,9 +95,8 @@ func (m *Manager) StartAutoReload(ctx context.Context, configPath string, logger
 		_ = watcher.Close()
 		return errors.New("access auto-reload is already running")
 	}
-	m.configPath = filepath.Clean(configPath)
-	m.logger = logger
-	m.auditor = audit.NewLogger(config.AuditLogPath(filepath.Dir(filepath.Dir(m.statePath))))
+	m.configPath = configPath
+	m.auditor = auditor
 	m.watcher = watcher
 	m.mu.Unlock()
 
@@ -355,9 +367,7 @@ func (m *Manager) recordReloadLocked(source ReloadSource) {
 		Timestamp: m.now().UTC(),
 		Component: "access",
 		Event:     "access_policy_reloaded",
-		Fields: map[string]string{
-			"source": string(source),
-		},
+		Source:    string(source),
 	}); err != nil {
 		m.logger.Error(
 			"failed to write access reload audit record",

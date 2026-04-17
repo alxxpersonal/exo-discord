@@ -1,13 +1,18 @@
 package access
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alxxpersonal/exo-discord/internal/audit"
 )
 
 // --- Test Cases ---
@@ -219,7 +224,7 @@ func TestManagerHotReloadsAllowlistOnConfigChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := manager.StartAutoReload(ctx, fixture.configPath, nil); err != nil {
+	if err := manager.StartAutoReload(ctx, fixture.configPath, audit.NewLogger(fixture.auditPath)); err != nil {
 		t.Fatalf("StartAutoReload() error = %v", err)
 	}
 
@@ -243,7 +248,7 @@ func TestManagerHotReloadsAllowlistOnConfigChange(t *testing.T) {
 		t.Fatalf("decision = %#v, want allowlisted_user", decision)
 	}
 
-	assertAuditReloadEvent(t, fixture.auditPath, `"source":"config"`)
+	assertAuditReloadEvent(t, fixture.auditPath, "config")
 }
 
 func TestManagerHotReloadsAccessStateOnApproval(t *testing.T) {
@@ -255,7 +260,7 @@ func TestManagerHotReloadsAccessStateOnApproval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := manager.StartAutoReload(ctx, fixture.configPath, nil); err != nil {
+	if err := manager.StartAutoReload(ctx, fixture.configPath, audit.NewLogger(fixture.auditPath)); err != nil {
 		t.Fatalf("StartAutoReload() error = %v", err)
 	}
 
@@ -296,7 +301,40 @@ func TestManagerHotReloadsAccessStateOnApproval(t *testing.T) {
 		t.Fatalf("decision = %#v, want paired_user allow", decision)
 	}
 
-	assertAuditReloadEvent(t, fixture.auditPath, `"source":"state"`)
+	assertAuditReloadEvent(t, fixture.auditPath, "state")
+}
+
+func TestManagerHotReloadsConfigAndStateAsBoth(t *testing.T) {
+	t.Parallel()
+
+	fixture := newHotReloadFixture(t)
+	manager := newHotReloadManager(t, fixture, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := manager.StartAutoReload(ctx, fixture.configPath, audit.NewLogger(fixture.auditPath)); err != nil {
+		t.Fatalf("StartAutoReload() error = %v", err)
+	}
+
+	state := DefaultState()
+	state.ApprovedUsers["user-2"] = ApprovedUser{
+		ApprovedAt: time.Now().UTC(),
+		Source:     "pairing",
+	}
+	writeHotReloadConfig(t, fixture.configPath, hotReloadConfigBody("user-1"))
+	if err := SaveState(fixture.statePath, state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	waitForManagerCondition(t, func() bool {
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		_, approved := manager.state.ApprovedUsers["user-2"]
+		return approved && slices.Contains(manager.policy.AllowedUserIDs, "user-1")
+	})
+
+	assertAuditReloadEvent(t, fixture.auditPath, "both")
 }
 
 func TestManagerRespectsCtxCancelOnAutoReload(t *testing.T) {
@@ -395,6 +433,8 @@ func TestStartAutoReloadNoOpWhenContextAlreadyCanceled(t *testing.T) {
 
 	fixture := newHotReloadFixture(t)
 	manager := newHotReloadManager(t, fixture, "")
+	var logBuffer bytes.Buffer
+	manager.SetLogger(slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -408,6 +448,16 @@ func TestStartAutoReloadNoOpWhenContextAlreadyCanceled(t *testing.T) {
 	if manager.watcher != nil {
 		t.Fatal("watcher = non-nil, want no watcher when context is already canceled")
 	}
+	if !strings.Contains(logBuffer.String(), "access auto-reload not started because context is already canceled") {
+		t.Fatalf("debug log = %q, want canceled start message", logBuffer.String())
+	}
+}
+
+func TestRecordReloadLockedWithoutAuditor(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t, Policy{})
+	manager.recordReloadLocked(ReloadSourceConfig)
 }
 
 // --- Helpers ---
@@ -522,7 +572,30 @@ func assertAuditReloadEvent(t *testing.T, path string, source string) {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(data), "\"event\":\"access_policy_reloaded\"") &&
-			strings.Contains(string(data), source)
+
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+
+			var entry map[string]any
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				return false
+			}
+			if entry["event"] != "access_policy_reloaded" {
+				continue
+			}
+
+			if got, ok := entry["source"].(string); !ok || got != source {
+				continue
+			}
+			if _, ok := entry["fields"]; ok {
+				t.Fatalf("reload audit entry has nested fields: %s", line)
+			}
+			return true
+		}
+
+		return false
 	})
 }
