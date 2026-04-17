@@ -445,7 +445,16 @@ func resolveChannelMetadata(session *discordgo.Session, message *discordgo.Messa
 	if session != nil && session.State != nil {
 		channel, err := session.State.Channel(message.ChannelID)
 		if err == nil && channel != nil {
-			return mapChannelType(channel.Type, channel.GuildID), channel.ParentID
+			kind := mapChannelType(channel.Type, channel.GuildID)
+			// channel.ParentID is the category for regular text channels and
+			// the parent channel for threads. Only surface it as
+			// ThreadParentID for thread channels so access evaluation does
+			// not accidentally substitute a category ID for the channel ID.
+			var threadParentID string
+			if kind == discord.ChannelKindPublicThread || kind == discord.ChannelKindPrivateThread {
+				threadParentID = channel.ParentID
+			}
+			return kind, threadParentID
 		}
 	}
 	return mapChannelType(0, message.GuildID), ""
