@@ -10,6 +10,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,5 +255,727 @@ func TestCodexAdapterDeliverWritesTurnStartOverWebsocket(t *testing.T) {
 	}
 	if got := turnStart.Params["threadId"]; got != "thread-2" {
 		t.Fatalf("threadId = %#v, want thread-2", got)
+	}
+}
+
+func TestCodexAdapterAutoCreatesThreadWhenAppServerEmpty(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-autocreate-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 6; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				if method != "initialize" {
+					t.Errorf("step 0 method = %q, want initialize", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				if method != "initialized" {
+					t.Errorf("step 1 method = %q, want initialized", method)
+					return
+				}
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 4:
+				if method != "thread/start" {
+					t.Errorf("step 4 method = %q, want thread/start", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"thread": map[string]any{"id": "thread-fresh"},
+				})
+			case 5:
+				if method != "turn/start" {
+					t.Errorf("step 5 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-fresh" {
+					t.Errorf("autocreated threadId = %#v, want thread-fresh", params["threadId"])
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"turn": map[string]any{"id": "turn-auto"},
+				})
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:        codexTransportUnix,
+		SocketPath:       socketPath,
+		ThreadID:         "thread-stale",
+		AutoCreateThread: true,
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	// empty list provider forces the auto-create path
+	adapter.threadStore = NewCodexThreadStore(homeDir, fakeThreadProvider{
+		err: errors.New("no codex threads were returned by thread/list"),
+	})
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	if adapter.threadID != "thread-fresh" {
+		t.Fatalf("adapter threadID = %q, want thread-fresh", adapter.threadID)
+	}
+	saved, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok || saved != "thread-fresh" {
+		t.Fatalf("cache thread = %q, %t, want thread-fresh, true", saved, ok)
+	}
+	if savedOrigin != codexThreadOriginAutoCreated {
+		t.Fatalf("cache origin = %q, want %q", savedOrigin, codexThreadOriginAutoCreated)
+	}
+
+	<-done
+}
+
+func TestCodexAdapterFailsGracefullyWhenAutoCreateDisabled(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-noautocreate-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 4; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				// initialized notification, no reply
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:        codexTransportUnix,
+		SocketPath:       socketPath,
+		ThreadID:         "thread-stale",
+		AutoCreateThread: false,
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	adapter.threadStore = NewCodexThreadStore(homeDir, fakeThreadProvider{
+		err: errors.New("no codex threads were returned by thread/list"),
+	})
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err == nil {
+		t.Fatal("Deliver() error = nil, want auto-create disabled failure")
+	}
+	if !strings.Contains(err.Error(), "auto-create is disabled") {
+		t.Fatalf("Deliver() error = %v, want auto-create disabled context", err)
+	}
+	if !strings.Contains(err.Error(), "--auto-create-thread") {
+		t.Fatalf("Deliver() error = %v, want flag hint", err)
+	}
+
+	<-done
+}
+
+func TestCodexAdapterDeliverSkipsResumeForAutoCreatedThread(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-skip-resume-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 5; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				if method != "initialize" {
+					t.Errorf("step 0 method = %q, want initialize", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				if method != "initialized" {
+					t.Errorf("step 1 method = %q, want initialized", method)
+					return
+				}
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-auto" {
+					t.Errorf("step 2 threadId = %#v, want thread-auto", params["threadId"])
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/list" {
+					t.Errorf("step 3 method = %q, want thread/list", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"data": []map[string]any{
+						{
+							"id":        "thread-live",
+							"updatedAt": 2,
+							"status": map[string]any{
+								"type": "active",
+							},
+						},
+					},
+				})
+			case 4:
+				if method != "turn/start" {
+					t.Errorf("step 4 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-live" {
+					t.Errorf("step 4 threadId = %#v, want thread-live", params["threadId"])
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"turn": map[string]any{"id": "turn-live"},
+				})
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:  codexTransportUnix,
+		SocketPath: socketPath,
+		ThreadID:   "thread-auto",
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	adapter.threadOrigin = codexThreadOriginAutoCreated
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	if adapter.threadID != "thread-live" {
+		t.Fatalf("adapter threadID = %q, want thread-live", adapter.threadID)
+	}
+	if adapter.threadOrigin != codexThreadOriginCached {
+		t.Fatalf("adapter threadOrigin = %q, want %q", adapter.threadOrigin, codexThreadOriginCached)
+	}
+	saved, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok || saved != "thread-live" {
+		t.Fatalf("cache thread = %q, %t, want thread-live, true", saved, ok)
+	}
+	if savedOrigin != codexThreadOriginCached {
+		t.Fatalf("cache origin = %q, want %q", savedOrigin, codexThreadOriginCached)
+	}
+
+	<-done
+}
+
+func TestCodexAdapterPersistsAutoCreatedThreadToCache(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-autocache-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	// two inbound events: first auto-creates after resume+list fail, second must
+	// reuse the cached id from ~/.exo-discord/codex-thread.json.
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 7; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				if method != "initialize" {
+					t.Errorf("step 0 method = %q, want initialize", method)
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				if method != "initialized" {
+					t.Errorf("step 1 method = %q, want initialized", method)
+				}
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-stale" {
+					t.Errorf("initial threadId = %#v, want thread-stale", params["threadId"])
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 4:
+				if method != "thread/start" {
+					t.Errorf("step 4 method = %q, want thread/start", method)
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"thread": map[string]any{"id": "thread-cached"},
+				})
+			case 5:
+				if method != "turn/start" {
+					t.Errorf("step 5 method = %q, want turn/start", method)
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-cached" {
+					t.Errorf("auto-created threadId = %#v, want thread-cached", params["threadId"])
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"turn": map[string]any{"id": "turn-a"},
+				})
+			case 6:
+				// second Deliver must reuse the cached thread id directly
+				if method != "turn/start" {
+					t.Errorf("step 6 method = %q, want turn/start", method)
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-cached" {
+					t.Errorf("reused threadId = %#v, want thread-cached", params["threadId"])
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"turn": map[string]any{"id": "turn-b"},
+				})
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:        codexTransportUnix,
+		SocketPath:       socketPath,
+		ThreadID:         "thread-stale",
+		AutoCreateThread: true,
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	adapter.threadStore = NewCodexThreadStore(homeDir, fakeThreadProvider{
+		err: errors.New("no codex threads were returned by thread/list"),
+	})
+
+	event := Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello 1",
+			Timestamp:      time.Now().UTC(),
+		},
+	}
+	if err := adapter.Deliver(context.Background(), event); err != nil {
+		t.Fatalf("Deliver(1) error = %v", err)
+	}
+	if saved, _, ok := adapter.threadStore.LoadThread(); !ok || saved != "thread-cached" {
+		t.Fatalf("cache after first = %q, %t, want thread-cached, true", saved, ok)
+	}
+	if adapter.threadID != "thread-cached" {
+		t.Fatalf("adapter threadID = %q, want thread-cached", adapter.threadID)
+	}
+
+	event.Message.ID = "msg-2"
+	event.Message.Content = "hello 2"
+	if err := adapter.Deliver(context.Background(), event); err != nil {
+		t.Fatalf("Deliver(2) error = %v", err)
+	}
+
+	<-done
+}
+
+// TestCodexAdapterConcurrentDeliverySerializesRecovery pins C1: three
+// concurrent inbound Deliver calls that all observe thread-not-found on
+// turn/start must share a single recovery pass. Exactly one thread/start
+// must hit the wire, all three Delivers must succeed, and they must all
+// converge on the same recovered thread id. Without the singleflight-gated
+// recovery path, each caller would race to mint its own thread and leave
+// orphans on the app-server.
+func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-concur-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	const concurrentDelivers = 3
+
+	var (
+		initializeCalls     atomic.Int32
+		initializedCalls    atomic.Int32
+		writeMu             sync.Mutex
+		threadStartCalls    atomic.Int32
+		threadResumeCalls   atomic.Int32
+		staleTurnStartCalls atomic.Int32
+		staleTurnStartReady = make(chan struct{}, concurrentDelivers)
+		releaseStaleTurns   = make(chan struct{})
+	)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		reader := bufio.NewReader(conn)
+		writeResponse := func(id any, result any) {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			writeUnixResponse(conn, id, result)
+		}
+		writeError := func(id any, message string) {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			writeUnixError(conn, id, message)
+		}
+
+		for {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+			method, _ := request["method"].(string)
+			id := request["id"]
+
+			switch method {
+			case "initialize":
+				if initializeCalls.Add(1) > 1 {
+					t.Errorf("initialize called more than once, want single cold-start handshake")
+				}
+				writeResponse(id, map[string]any{})
+			case "initialized":
+				initializedCalls.Add(1)
+			case "turn/start":
+				params, _ := request["params"].(map[string]any)
+				threadID, _ := params["threadId"].(string)
+				switch threadID {
+				case "thread-stale":
+					// hold every stale turn/start until all concurrent callers
+					// have hit this branch, then release them together so the
+					// recovery path is entered concurrently by all three.
+					staleTurnStartCalls.Add(1)
+					go func(requestID any) {
+						staleTurnStartReady <- struct{}{}
+						<-releaseStaleTurns
+						writeError(requestID, "thread not found")
+					}(id)
+				case "thread-recovered":
+					writeResponse(id, map[string]any{
+						"turn": map[string]any{"id": "turn-" + strconv.FormatInt(time.Now().UnixNano(), 10)},
+					})
+				default:
+					t.Errorf("unexpected turn/start threadId = %q", threadID)
+					writeError(id, "unexpected thread id")
+				}
+			case "thread/resume":
+				threadResumeCalls.Add(1)
+				writeError(id, "thread not found")
+			case "thread/start":
+				if threadStartCalls.Add(1) > 1 {
+					t.Errorf("thread/start called more than once, want singleflight-gated")
+				}
+				writeResponse(id, map[string]any{
+					"thread": map[string]any{"id": "thread-recovered"},
+				})
+			default:
+				t.Errorf("unexpected method %q", method)
+				writeError(id, "unexpected method")
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:        codexTransportUnix,
+		SocketPath:       socketPath,
+		ThreadID:         "thread-stale",
+		AutoCreateThread: true,
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	// force the discovery path to fail so recovery lands on auto-create and
+	// emits a thread/start we can count reliably.
+	adapter.threadStore = NewCodexThreadStore(homeDir, fakeThreadProvider{
+		err: errors.New("no codex threads were returned by thread/list"),
+	})
+
+	// release the stale turn/start responses once all concurrent callers
+	// have sent their initial turn/start request.
+	go func() {
+		for i := 0; i < concurrentDelivers; i++ {
+			select {
+			case <-staleTurnStartReady:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for stale turn/start #%d", i+1)
+				close(releaseStaleTurns)
+				return
+			}
+		}
+		close(releaseStaleTurns)
+	}()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, concurrentDelivers)
+	for i := 0; i < concurrentDelivers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			errCh <- adapter.Deliver(context.Background(), Event{
+				Source: "discord",
+				Message: MessageEvent{
+					ID:             "msg-" + strconv.Itoa(index),
+					ChannelID:      "chan-1",
+					AuthorID:       "user-1",
+					AuthorUsername: "alice",
+					Content:        "hello " + strconv.Itoa(index),
+					Timestamp:      time.Now().UTC(),
+				},
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for deliverErr := range errCh {
+		if deliverErr != nil {
+			t.Fatalf("Deliver() error = %v", deliverErr)
+		}
+	}
+
+	if got := threadStartCalls.Load(); got != 1 {
+		t.Fatalf("thread/start calls = %d, want exactly 1", got)
+	}
+	if got := initializeCalls.Load(); got != 1 {
+		t.Fatalf("initialize calls = %d, want exactly 1", got)
+	}
+	if got := initializedCalls.Load(); got != 1 {
+		t.Fatalf("initialized calls = %d, want exactly 1", got)
+	}
+	if got := staleTurnStartCalls.Load(); got != concurrentDelivers {
+		t.Fatalf("stale turn/start calls = %d, want %d", got, concurrentDelivers)
+	}
+	if got := threadResumeCalls.Load(); got > 1 {
+		t.Fatalf("thread/resume calls = %d, want at most 1", got)
+	}
+
+	adapter.mu.Lock()
+	finalID := adapter.threadID
+	finalOrigin := adapter.threadOrigin
+	adapter.mu.Unlock()
+	if finalID != "thread-recovered" {
+		t.Fatalf("adapter threadID = %q, want thread-recovered", finalID)
+	}
+	if finalOrigin != codexThreadOriginAutoCreated {
+		t.Fatalf("adapter threadOrigin = %q, want %q", finalOrigin, codexThreadOriginAutoCreated)
+	}
+
+	saved, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok || saved != "thread-recovered" {
+		t.Fatalf("cache thread = %q, %t, want thread-recovered, true", saved, ok)
+	}
+	if savedOrigin != codexThreadOriginAutoCreated {
+		t.Fatalf("cache origin = %q, want %q", savedOrigin, codexThreadOriginAutoCreated)
+	}
+
+	_ = adapter.Close()
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mock server did not shut down")
 	}
 }

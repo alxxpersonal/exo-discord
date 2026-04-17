@@ -27,16 +27,19 @@ func TestCodexThreadStoreSaveAndLoad(t *testing.T) {
 	t.Parallel()
 
 	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
-	if err := store.SaveThread("thread-1"); err != nil {
+	if err := store.SaveThread("thread-1", codexThreadOriginConfigured); err != nil {
 		t.Fatalf("SaveThread() error = %v", err)
 	}
 
-	threadID, ok := store.LoadThread()
+	threadID, origin, ok := store.LoadThread()
 	if !ok {
 		t.Fatal("LoadThread() ok = false, want true")
 	}
 	if threadID != "thread-1" {
 		t.Fatalf("thread id = %q, want thread-1", threadID)
+	}
+	if origin != codexThreadOriginConfigured {
+		t.Fatalf("origin = %q, want %q", origin, codexThreadOriginConfigured)
 	}
 }
 
@@ -81,7 +84,7 @@ func TestCodexThreadStoreLoadThreadMissingFile(t *testing.T) {
 	t.Parallel()
 
 	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
-	threadID, ok := store.LoadThread()
+	threadID, _, ok := store.LoadThread()
 	if ok {
 		t.Fatalf("LoadThread() ok = true, want false with thread %q", threadID)
 	}
@@ -91,7 +94,7 @@ func TestCodexThreadStoreSaveThreadRejectsEmptyID(t *testing.T) {
 	t.Parallel()
 
 	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
-	if err := store.SaveThread(""); err == nil {
+	if err := store.SaveThread("", codexThreadOriginConfigured); err == nil {
 		t.Fatal("SaveThread() error = nil, want error")
 	}
 }
@@ -107,8 +110,31 @@ func TestCodexThreadStoreLoadThreadRejectsInvalidJSON(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	if threadID, ok := store.LoadThread(); ok {
+	if threadID, _, ok := store.LoadThread(); ok {
 		t.Fatalf("LoadThread() = %q, true; want false", threadID)
+	}
+}
+
+func TestCodexThreadStoreLoadThreadTreatsV1FileAsCached(t *testing.T) {
+	t.Parallel()
+
+	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
+	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(store.path, []byte("{\"thread_id\":\"thread-v1\"}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	threadID, origin, ok := store.LoadThread()
+	if !ok {
+		t.Fatal("LoadThread() ok = false, want true")
+	}
+	if threadID != "thread-v1" {
+		t.Fatalf("thread id = %q, want thread-v1", threadID)
+	}
+	if origin != codexThreadOriginCached {
+		t.Fatalf("origin = %q, want %q", origin, codexThreadOriginCached)
 	}
 }
 
@@ -117,7 +143,7 @@ func TestCodexThreadStoreSaveThreadUsesStrictPerms(t *testing.T) {
 
 	homeDir := t.TempDir()
 	store := NewCodexThreadStore(homeDir, fakeThreadListProvider{})
-	if err := store.SaveThread("thread-1"); err != nil {
+	if err := store.SaveThread("thread-1", codexThreadOriginConfigured); err != nil {
 		t.Fatalf("SaveThread() error = %v", err)
 	}
 

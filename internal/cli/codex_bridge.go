@@ -18,11 +18,13 @@ import (
 
 func newCodexBridgeCommand(env Environment) *cobra.Command {
 	var (
-		transport       string
-		socketPath      string
-		websocketURL    string
-		threadID        string
-		mirrorResponses bool
+		transport          string
+		socketPath         string
+		websocketURL       string
+		threadID           string
+		mirrorResponses    bool
+		autoCreateThread   bool
+		noAutoCreateThread bool
 	)
 
 	cmd := &cobra.Command{
@@ -49,6 +51,12 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 			if !cmd.Flags().Changed("mirror-responses") {
 				mirrorResponses = resolved.Config.Channel.Codex.MirrorResponses
 			}
+			if !cmd.Flags().Changed("auto-create-thread") {
+				autoCreateThread = resolved.Config.Channel.Codex.AutoCreateThread
+			}
+			if cmd.Flags().Changed("no-auto-create-thread") {
+				autoCreateThread = false
+			}
 
 			if err := validateCodexBridgeFlags(transport, socketPath, websocketURL); err != nil {
 				return err
@@ -62,11 +70,12 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 			adapter, err := env.NewChannelAdapter(channelbridge.Config{
 				Enabled: []string{"codex"},
 				Codex: channelbridge.CodexConfig{
-					Transport:       transport,
-					SocketPath:      socketPath,
-					WebsocketURL:    websocketURL,
-					ThreadID:        threadID,
-					MirrorResponses: mirrorResponses,
+					Transport:        transport,
+					SocketPath:       socketPath,
+					WebsocketURL:     websocketURL,
+					ThreadID:         threadID,
+					MirrorResponses:  mirrorResponses,
+					AutoCreateThread: autoCreateThread,
 				},
 			}, channelbridge.HookEnv{
 				HomeDir: env.HomeDir,
@@ -117,6 +126,9 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 	cmd.Flags().StringVar(&websocketURL, "websocket-url", "", "websocket url for codex app-server")
 	cmd.Flags().StringVar(&threadID, "thread", "", "explicit codex thread id")
 	cmd.Flags().BoolVar(&mirrorResponses, "mirror-responses", false, "reply back to Discord when Codex completes a turn")
+	cmd.Flags().BoolVar(&autoCreateThread, "auto-create-thread", true, "create a new codex thread when the requested thread is missing from the app-server namespace")
+	cmd.Flags().BoolVar(&noAutoCreateThread, "no-auto-create-thread", false, "disable automatic codex thread creation when the requested thread is missing from the app-server namespace")
+	_ = cmd.Flags().MarkHidden("no-auto-create-thread")
 	return cmd
 }
 

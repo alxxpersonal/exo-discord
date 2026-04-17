@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -257,7 +258,7 @@ func TestCodexAdapterResolveThreadIDPaths(t *testing.T) {
 		threadStore: store,
 	}
 
-	id, explicit, err := adapter.resolveThreadID(context.Background())
+	id, explicit, _, err := adapter.resolveThreadID(context.Background())
 	if err != nil {
 		t.Fatalf("resolveThreadID() error = %v", err)
 	}
@@ -265,10 +266,10 @@ func TestCodexAdapterResolveThreadIDPaths(t *testing.T) {
 		t.Fatalf("resolveThreadID() = %q, %t", id, explicit)
 	}
 
-	if err := store.SaveThread("thread-saved"); err != nil {
+	if err := store.SaveThread("thread-saved", codexThreadOriginCached); err != nil {
 		t.Fatalf("SaveThread() error = %v", err)
 	}
-	id, explicit, err = adapter.resolveThreadID(context.Background())
+	id, explicit, _, err = adapter.resolveThreadID(context.Background())
 	if err != nil {
 		t.Fatalf("resolveThreadID() error = %v", err)
 	}
@@ -277,7 +278,7 @@ func TestCodexAdapterResolveThreadIDPaths(t *testing.T) {
 	}
 
 	adapter.threadID = "thread-explicit"
-	id, explicit, err = adapter.resolveThreadID(context.Background())
+	id, explicit, _, err = adapter.resolveThreadID(context.Background())
 	if err != nil {
 		t.Fatalf("resolveThreadID() error = %v", err)
 	}
@@ -536,6 +537,93 @@ func TestCodexAdapterRequestWriteError(t *testing.T) {
 	err := adapter.request(context.Background(), "thread/list", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "write failed") {
 		t.Fatalf("request() error = %v, want write failure", err)
+	}
+}
+
+func TestCodexAdapterInitializeConnectionSendsHandshake(t *testing.T) {
+	t.Parallel()
+
+	response, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result":  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	conn := &scriptedCodexConnection{
+		reads: [][]byte{response},
+	}
+	adapter := &CodexAdapter{}
+	if err := adapter.initializeConnection(context.Background(), conn); err != nil {
+		t.Fatalf("initializeConnection() error = %v", err)
+	}
+
+	if len(conn.writes) != 2 {
+		t.Fatalf("writes = %d, want 2", len(conn.writes))
+	}
+
+	var initializeRequest codexRequestMessage
+	if err := json.Unmarshal(conn.writes[0], &initializeRequest); err != nil {
+		t.Fatalf("Unmarshal(initialize) error = %v", err)
+	}
+	if initializeRequest.Method != "initialize" {
+		t.Fatalf("first method = %q, want initialize", initializeRequest.Method)
+	}
+
+	var initializedRequest codexRequestMessage
+	if err := json.Unmarshal(conn.writes[1], &initializedRequest); err != nil {
+		t.Fatalf("Unmarshal(initialized) error = %v", err)
+	}
+	if initializedRequest.Method != "initialized" {
+		t.Fatalf("second method = %q, want initialized", initializedRequest.Method)
+	}
+}
+
+func TestCodexAdapterNotifyWritesToActiveConnection(t *testing.T) {
+	t.Parallel()
+
+	conn := &fakeCodexConnection{}
+	adapter := &CodexAdapter{conn: conn}
+	if err := adapter.notify(context.Background(), "initialized", codexInitializedParams{}); err != nil {
+		t.Fatalf("notify() error = %v", err)
+	}
+
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var request codexRequestMessage
+	if err := json.Unmarshal(conn.writes[0], &request); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if request.Method != "initialized" {
+		t.Fatalf("method = %q, want initialized", request.Method)
+	}
+}
+
+func TestCodexAdapterWaitForReconnectDelayTimer(t *testing.T) {
+	t.Parallel()
+
+	adapter := &CodexAdapter{closeCh: make(chan struct{})}
+	if err := adapter.waitForReconnectDelay(context.Background(), time.Millisecond); err != nil {
+		t.Fatalf("waitForReconnectDelay() error = %v", err)
+	}
+}
+
+func TestCodexAdapterWaitForReconnectDelayReturnsCanceledWhenClosed(t *testing.T) {
+	t.Parallel()
+
+	closeCh := make(chan struct{})
+	close(closeCh)
+	adapter := &CodexAdapter{closeCh: closeCh}
+
+	if err := adapter.waitForReconnectDelay(context.Background(), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForReconnectDelay(0) error = %v, want context.Canceled", err)
+	}
+	if err := adapter.waitForReconnectDelay(context.Background(), time.Millisecond); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForReconnectDelay(timer) error = %v, want context.Canceled", err)
 	}
 }
 
@@ -941,7 +1029,7 @@ func TestIsThreadNotFoundError(t *testing.T) {
 	}
 }
 
-func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
+func TestCodexAdapterDeliverRetriesV1SavedThreadAndMirrorsResponse(t *testing.T) {
 	t.Parallel()
 
 	socketPath := "/tmp/exo-discord-retry-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".sock"
@@ -967,7 +1055,7 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 		}()
 
 		reader := bufio.NewReader(conn)
-		for step := 0; step < 5; step++ {
+		for step := 0; step < 6; step++ {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				return
@@ -998,8 +1086,19 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 				}
 				writeUnixError(conn, request["id"], "thread not found")
 			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-stale" {
+					t.Errorf("step 3 threadId = %#v, want thread-stale", params["threadId"])
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 4:
 				if method != "thread/list" {
-					t.Errorf("step 3 method = %q, want thread/list", method)
+					t.Errorf("step 4 method = %q, want thread/list", method)
 					return
 				}
 				writeUnixResponse(conn, request["id"], map[string]any{
@@ -1013,9 +1112,9 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 						},
 					},
 				})
-			case 4:
+			case 5:
 				if method != "turn/start" {
-					t.Errorf("step 4 method = %q, want turn/start", method)
+					t.Errorf("step 5 method = %q, want turn/start", method)
 					return
 				}
 				params := request["params"].(map[string]any)
@@ -1062,8 +1161,21 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCodexAdapter() error = %v", err)
 	}
-	if err := adapter.threadStore.SaveThread("thread-stale"); err != nil {
-		t.Fatalf("SaveThread() error = %v", err)
+	if err := os.MkdirAll(filepath.Dir(adapter.threadStore.path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(adapter.threadStore.path, []byte("{\"thread_id\":\"thread-stale\"}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	savedID, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok {
+		t.Fatal("LoadThread() ok = false, want true")
+	}
+	if savedID != "thread-stale" {
+		t.Fatalf("saved thread id = %q, want thread-stale", savedID)
+	}
+	if savedOrigin != codexThreadOriginCached {
+		t.Fatalf("saved origin = %q, want %q", savedOrigin, codexThreadOriginCached)
 	}
 
 	err = adapter.Deliver(context.Background(), Event{
@@ -1118,7 +1230,7 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 		}()
 
 		reader := bufio.NewReader(conn)
-		for step := 0; step < 5; step++ {
+		for step := 0; step < 6; step++ {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				return
@@ -1155,8 +1267,15 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 				}
 				writeUnixError(conn, request["id"], "thread not found")
 			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				// resume fails because the stale id is not on disk either
+				writeUnixError(conn, request["id"], "thread not found")
+			case 4:
 				if method != "thread/list" {
-					t.Errorf("step 3 method = %q, want thread/list", method)
+					t.Errorf("step 4 method = %q, want thread/list", method)
 					return
 				}
 				writeUnixResponse(conn, request["id"], map[string]any{
@@ -1170,9 +1289,9 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 						},
 					},
 				})
-			case 4:
+			case 5:
 				if method != "turn/start" {
-					t.Errorf("step 4 method = %q, want turn/start", method)
+					t.Errorf("step 5 method = %q, want turn/start", method)
 					return
 				}
 				params := request["params"].(map[string]any)
@@ -1218,7 +1337,7 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 	if adapter.threadID != "thread-new" {
 		t.Fatalf("threadID = %q, want thread-new", adapter.threadID)
 	}
-	if savedThreadID, ok := adapter.threadStore.LoadThread(); !ok || savedThreadID != "thread-new" {
+	if savedThreadID, _, ok := adapter.threadStore.LoadThread(); !ok || savedThreadID != "thread-new" {
 		t.Fatalf("saved thread = %q, %t, want thread-new, true", savedThreadID, ok)
 	}
 
@@ -1251,7 +1370,7 @@ func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testi
 		}()
 
 		reader := bufio.NewReader(conn)
-		for step := 0; step < 3; step++ {
+		for step := 0; step < 4; step++ {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				return
@@ -1281,6 +1400,13 @@ func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testi
 					t.Errorf("step 2 method = %q, want turn/start", method)
 					return
 				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				// resume fails: thread id is stale on disk too
 				writeUnixError(conn, request["id"], "thread not found")
 			}
 		}
@@ -1314,8 +1440,8 @@ func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testi
 	if err == nil {
 		t.Fatal("Deliver() error = nil, want rediscovery failure")
 	}
-	if !strings.Contains(err.Error(), "rediscover codex thread after thread not found") {
-		t.Fatalf("Deliver() error = %v, want rediscovery context", err)
+	if !strings.Contains(err.Error(), "auto-create is disabled") {
+		t.Fatalf("Deliver() error = %v, want auto-create-disabled context", err)
 	}
 	if !strings.Contains(err.Error(), "no active codex threads found") {
 		t.Fatalf("Deliver() error = %v, want discovery failure", err)
