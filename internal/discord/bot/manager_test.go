@@ -252,9 +252,9 @@ func TestDiscordGoManagerHelpersAndSubscription(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	called := false
+	received := make(chan discord.InteractionEvent, 1)
 	unsubscribe := manager.SubscribeInteractions(func(_ context.Context, event discord.InteractionEvent) {
-		called = event.ID == "int-1"
+		received <- event
 	})
 	manager.handleInteractionCreate(context.Background(), &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -266,11 +266,15 @@ func TestDiscordGoManagerHelpersAndSubscription(t *testing.T) {
 			Token:     "tok-1",
 		},
 	})
-	time.Sleep(10 * time.Millisecond)
 	unsubscribe()
 
-	if !called {
-		t.Fatal("interaction handler was not called")
+	select {
+	case event := <-received:
+		if event.ID != "int-1" {
+			t.Fatalf("event.ID = %q, want int-1", event.ID)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for interaction handler")
 	}
 
 	if err := (&DiscordGoManager{}).Close(context.Background()); err != nil {
