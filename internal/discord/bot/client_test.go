@@ -401,6 +401,11 @@ func TestGatewayLifecycleAndMessageHandler(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && client.BotUserID() == "" {
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	if got, want := client.BotUserID(), "bot-1"; got != want {
 		t.Fatalf("BotUserID() = %q, want %q", got, want)
 	}

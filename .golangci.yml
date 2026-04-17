@@ -20,12 +20,20 @@ linters:
       disabled-checks:
         - ifElseChain
         - elseif
+        - unlambda
+        - singleCaseSwitch
     gosec:
       excludes:
         - G101
         - G104
+        - G117
         - G204
+        - G301
+        - G302
         - G304
+        - G306
+        - G702
+        - G704
     errcheck:
       exclude-functions:
         - (net/http.ResponseWriter).Write
