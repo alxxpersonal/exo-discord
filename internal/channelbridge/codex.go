@@ -75,21 +75,22 @@ type CodexAdapter struct {
 	serviceCancel    context.CancelFunc
 	reconnectBackoff []time.Duration
 
-	mu           sync.Mutex
-	conn         codexConnection
-	connecting   bool
-	connectWait  chan struct{}
-	connectErr   error
-	pending      map[int64]chan codexResponseMessage
-	turns        map[string]codexMirrorTarget
-	turnTexts    map[string][]string
-	mirrorWG     sync.WaitGroup
-	nextID       int64
-	closeCh      chan struct{}
-	closeErr     error
-	closeOnce    sync.Once
-	threadOrigin codexThreadOrigin
-	recoverGroup singleflight.Group
+	mu             sync.Mutex
+	conn           codexConnection
+	connecting     bool
+	connectWait    chan struct{}
+	connectErr     error
+	pending        map[int64]chan codexResponseMessage
+	pendingMirrors map[int64]codexMirrorTarget
+	turns          map[string]codexMirrorTarget
+	turnTexts      map[string][]codexThreadItem
+	mirrorWG       sync.WaitGroup
+	nextID         int64
+	closeCh        chan struct{}
+	closeErr       error
+	closeOnce      sync.Once
+	threadOrigin   codexThreadOrigin
+	recoverGroup   singleflight.Group
 }
 
 // codexRecoverResult is the value returned by the singleflight recovery
@@ -216,13 +217,8 @@ type codexTurnStartResponse struct {
 }
 
 type codexTurn struct {
-	ID    string          `json:"id"`
-	Items []codexTurnItem `json:"items,omitempty"`
-}
-
-type codexTurnItem struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	ID    string            `json:"id"`
+	Items []codexThreadItem `json:"items,omitempty"`
 }
 
 type codexTurnCompletedNotification struct {
@@ -235,8 +231,8 @@ type codexTurnCompletedNotification struct {
 // reply text exclusively via this notification - `turn/completed` carries an
 // empty `items` slice per v2 protocol contract.
 type codexItemCompletedNotification struct {
-	ThreadID string         `json:"threadId"`
-	TurnID   string         `json:"turnId"`
+	ThreadID string          `json:"threadId"`
+	TurnID   string          `json:"turnId"`
 	Item     codexThreadItem `json:"item"`
 }
 
@@ -245,9 +241,10 @@ type codexItemCompletedNotification struct {
 // variants (reasoning, commandExecution, etc.) are ignored by leaving their
 // fields zero-valued.
 type codexThreadItem struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	Text string `json:"text,omitempty"`
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Text  string `json:"text,omitempty"`
+	Phase string `json:"phase,omitempty"`
 }
 
 type codexMirrorTarget struct {
@@ -280,8 +277,9 @@ func NewCodexAdapter(cfg CodexConfig, hookEnv HookEnv) (*CodexAdapter, error) {
 		serviceCancel:    serviceCancel,
 		reconnectBackoff: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond},
 		pending:          make(map[int64]chan codexResponseMessage),
+		pendingMirrors:   make(map[int64]codexMirrorTarget),
 		turns:            make(map[string]codexMirrorTarget),
-		turnTexts:        make(map[string][]string),
+		turnTexts:        make(map[string][]codexThreadItem),
 		closeCh:          make(chan struct{}),
 	}
 	if cfg.ThreadID != "" {
@@ -326,7 +324,17 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 	fallbackPath := "none"
 
 	formatted := formatCodexInput(event)
-	started, startErr := a.startTurn(ctx, threadID, formatted)
+	var mirrorTarget *codexMirrorTarget
+	if a.mirrorResponses && a.session != nil {
+		target := codexMirrorTarget{
+			ChannelID: event.Message.ChannelID,
+			GuildID:   event.Message.GuildID,
+			MessageID: event.Message.ID,
+		}
+		mirrorTarget = &target
+	}
+
+	_, startErr := a.startTurn(ctx, threadID, formatted, mirrorTarget)
 	if startErr != nil && isThreadNotFoundError(startErr) {
 		recovered, recoverErr := a.recoverThreadSingleflight(ctx, threadID, origin)
 		if recoverErr != nil {
@@ -341,7 +349,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 		)
 		threadID = recovered.threadID
 		origin = recovered.origin
-		started, startErr = a.startTurn(ctx, threadID, formatted)
+		_, startErr = a.startTurn(ctx, threadID, formatted, mirrorTarget)
 	}
 	if startErr != nil {
 		a.auditDelivery(event, originalThreadID, threadID, "error", fallbackPath, startErr.Error())
@@ -368,16 +376,6 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 		}
 	}
 	a.auditDelivery(event, originalThreadID, threadID, "success", fallbackPath, "")
-
-	if a.mirrorResponses && a.session != nil && started.Turn.ID != "" {
-		a.mu.Lock()
-		a.turns[started.Turn.ID] = codexMirrorTarget{
-			ChannelID: event.Message.ChannelID,
-			GuildID:   event.Message.GuildID,
-			MessageID: event.Message.ID,
-		}
-		a.mu.Unlock()
-	}
 
 	return nil
 }
@@ -693,6 +691,8 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 		data, err := conn.ReadJSON(ctx)
 		if err != nil {
 			shuttingDown := a.isShuttingDown()
+			response := codexResponseMessage{Error: &codexRPCError{Message: err.Error()}}
+			var pending []chan codexResponseMessage
 			a.mu.Lock()
 			if a.conn == conn {
 				a.conn = nil
@@ -700,11 +700,16 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 			if !shuttingDown {
 				a.closeErr = err
 			}
-			for id, pending := range a.pending {
+			pending = make([]chan codexResponseMessage, 0, len(a.pending))
+			for id, waitCh := range a.pending {
 				delete(a.pending, id)
-				pending <- codexResponseMessage{Error: &codexRPCError{Message: err.Error()}}
+				pending = append(pending, waitCh)
 			}
+			clear(a.pendingMirrors)
 			a.mu.Unlock()
+			for _, waitCh := range pending {
+				waitCh <- response
+			}
 			_ = conn.Close()
 			return
 		}
@@ -733,7 +738,15 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 			a.mu.Lock()
 			pending := a.pending[id]
 			delete(a.pending, id)
+			promoteErr := a.promotePendingMirrorLocked(id, response)
 			a.mu.Unlock()
+			if promoteErr != nil {
+				slog.Warn("codex mirror registration failed",
+					"adapter", a.Name(),
+					"request_id", id,
+					"error", promoteErr,
+				)
+			}
 			if pending != nil {
 				pending <- response
 			}
@@ -820,7 +833,10 @@ func (a *CodexAdapter) handleItemCompleted(params json.RawMessage) {
 		a.mu.Unlock()
 		return
 	}
-	a.turnTexts[completed.TurnID] = append(a.turnTexts[completed.TurnID], completed.Item.Text)
+	if a.turnTexts == nil {
+		a.turnTexts = make(map[string][]codexThreadItem)
+	}
+	a.turnTexts[completed.TurnID] = append(a.turnTexts[completed.TurnID], completed.Item)
 	a.mu.Unlock()
 }
 
@@ -831,8 +847,9 @@ func (a *CodexAdapter) handleItemCompleted(params json.RawMessage) {
 // per-turn buffer written by `item/completed` handlers.
 //
 // Legacy fallback: if no text was buffered but the notification itself
-// carries items (e.g. a future protocol change or a test harness), fall back
-// to the last agent message inside the payload.
+// carries items (e.g. a future protocol change or a test harness), prefer
+// phase-tagged final answers when available and otherwise preserve the older
+// joined-agent-message behavior for phase-less payloads.
 func (a *CodexAdapter) handleTurnCompleted(params json.RawMessage) {
 	var completed codexTurnCompletedNotification
 	if err := json.Unmarshal(params, &completed); err != nil {
@@ -853,7 +870,7 @@ func (a *CodexAdapter) handleTurnCompleted(params json.RawMessage) {
 		return
 	}
 
-	text := strings.Join(buffered, "\n\n")
+	text := joinCodexAgentMessages(buffered)
 	if text == "" {
 		text = lastCodexAgentMessage(completed.Turn.Items)
 	}
@@ -894,6 +911,8 @@ func (a *CodexAdapter) dispatchMirror(target codexMirrorTarget, turnID string, t
 	go func() {
 		defer a.mirrorWG.Done()
 		ctx := a.mirrorContext()
+		chunkCount := mirrorChunkCount(text)
+		charCount := len([]rune(text))
 		if err := replyWithChunks(ctx, a.session, target, text); err != nil {
 			slog.Warn("codex mirror reply failed",
 				"adapter", a.Name(),
@@ -901,6 +920,8 @@ func (a *CodexAdapter) dispatchMirror(target codexMirrorTarget, turnID string, t
 				"thread_id", threadID,
 				"channel_id", target.ChannelID,
 				"message_id", target.MessageID,
+				"chunk_count", chunkCount,
+				"char_count", charCount,
 				"error", err,
 			)
 			return
@@ -912,8 +933,8 @@ func (a *CodexAdapter) dispatchMirror(target codexMirrorTarget, turnID string, t
 			"thread_id", threadID,
 			"channel_id", target.ChannelID,
 			"message_id", target.MessageID,
-			"chunk_count", mirrorChunkCount(text),
-			"char_count", len([]rune(text)),
+			"chunk_count", chunkCount,
+			"char_count", charCount,
 		)
 	}()
 }
@@ -927,11 +948,24 @@ func mirrorChunkCount(text string) int {
 // --- JSON-RPC Helpers ---
 
 func (a *CodexAdapter) request(ctx context.Context, method string, params any, result any) error {
+	return a.requestWithMirror(ctx, method, params, result, nil)
+}
+
+func (a *CodexAdapter) requestWithMirror(ctx context.Context, method string, params any, result any, mirrorTarget *codexMirrorTarget) error {
 	id := atomic.AddInt64(&a.nextID, 1)
 	responseCh := make(chan codexResponseMessage, 1)
 
 	a.mu.Lock()
+	if a.pending == nil {
+		a.pending = make(map[int64]chan codexResponseMessage)
+	}
 	a.pending[id] = responseCh
+	if mirrorTarget != nil {
+		if a.pendingMirrors == nil {
+			a.pendingMirrors = make(map[int64]codexMirrorTarget)
+		}
+		a.pendingMirrors[id] = *mirrorTarget
+	}
 	a.mu.Unlock()
 
 	if err := a.write(ctx, codexRequestMessage{
@@ -942,6 +976,7 @@ func (a *CodexAdapter) request(ctx context.Context, method string, params any, r
 	}); err != nil {
 		a.mu.Lock()
 		delete(a.pending, id)
+		delete(a.pendingMirrors, id)
 		a.mu.Unlock()
 		return err
 	}
@@ -950,6 +985,7 @@ func (a *CodexAdapter) request(ctx context.Context, method string, params any, r
 	case <-ctx.Done():
 		a.mu.Lock()
 		delete(a.pending, id)
+		delete(a.pendingMirrors, id)
 		a.mu.Unlock()
 		return ctx.Err()
 	case response := <-responseCh:
@@ -1174,9 +1210,9 @@ func (a *CodexAdapter) auditDelivery(event Event, originalThreadID string, final
 	slog.Info("codex delivery outcome", attrs...)
 }
 
-func (a *CodexAdapter) startTurn(ctx context.Context, threadID string, formatted string) (codexTurnStartResponse, error) {
+func (a *CodexAdapter) startTurn(ctx context.Context, threadID string, formatted string, mirrorTarget *codexMirrorTarget) (codexTurnStartResponse, error) {
 	var response codexTurnStartResponse
-	err := a.request(ctx, "turn/start", codexTurnStartParams{
+	err := a.requestWithMirror(ctx, "turn/start", codexTurnStartParams{
 		ThreadID: threadID,
 		Input: []codexUserInput{
 			{
@@ -1185,9 +1221,12 @@ func (a *CodexAdapter) startTurn(ctx context.Context, threadID string, formatted
 				TextElements: []any{},
 			},
 		},
-	}, &response)
+	}, &response, mirrorTarget)
 	if err != nil {
 		return codexTurnStartResponse{}, err
+	}
+	if response.Turn.ID == "" {
+		return codexTurnStartResponse{}, fmt.Errorf("turn/start response: empty turn id")
 	}
 	return response, nil
 }
@@ -1249,13 +1288,51 @@ func formatCodexInput(event Event) string {
 	return buffer.String()
 }
 
-func lastCodexAgentMessage(items []codexTurnItem) string {
+func lastCodexAgentMessage(items []codexThreadItem) string {
 	for index := len(items) - 1; index >= 0; index-- {
 		if items[index].Type == "agentMessage" && items[index].Text != "" {
 			return items[index].Text
 		}
 	}
 	return ""
+}
+
+func joinCodexAgentMessages(items []codexThreadItem) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type != "agentMessage" || item.Text == "" {
+			continue
+		}
+		parts = append(parts, item.Text)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (a *CodexAdapter) promotePendingMirrorLocked(id int64, response codexResponseMessage) error {
+	target, ok := a.pendingMirrors[id]
+	if !ok {
+		return nil
+	}
+	delete(a.pendingMirrors, id)
+	if response.Error != nil {
+		return nil
+	}
+	if len(response.Result) == 0 {
+		return fmt.Errorf("turn/start response missing result")
+	}
+
+	var started codexTurnStartResponse
+	if err := json.Unmarshal(response.Result, &started); err != nil {
+		return fmt.Errorf("decode turn/start response: %w", err)
+	}
+	if started.Turn.ID == "" {
+		return fmt.Errorf("turn/start response missing turn id")
+	}
+	if a.turns == nil {
+		a.turns = make(map[string]codexMirrorTarget)
+	}
+	a.turns[started.Turn.ID] = target
+	return nil
 }
 
 func replyWithChunks(ctx context.Context, session discordpkg.Session, target codexMirrorTarget, text string) error {
