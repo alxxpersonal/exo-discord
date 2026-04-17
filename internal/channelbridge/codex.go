@@ -89,6 +89,7 @@ type CodexAdapter struct {
 	closeCh        chan struct{}
 	closeErr       error
 	closeOnce      sync.Once
+	shuttingDown   bool
 	threadOrigin   codexThreadOrigin
 	recoverGroup   singleflight.Group
 }
@@ -384,19 +385,21 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 // via the service context and awaited so Close does not return while a
 // goroutine still holds a Reply in flight.
 func (a *CodexAdapter) Close() error {
-	if a.serviceCancel != nil {
-		a.serviceCancel()
-	}
+	var conn codexConnection
 	a.closeOnce.Do(func() {
+		a.mu.Lock()
+		a.shuttingDown = true
+		conn = a.conn
+		a.conn = nil
+		a.mu.Unlock()
+
+		if a.serviceCancel != nil {
+			a.serviceCancel()
+		}
 		if a.closeCh != nil {
 			close(a.closeCh)
 		}
 	})
-
-	a.mu.Lock()
-	conn := a.conn
-	a.conn = nil
-	a.mu.Unlock()
 
 	a.mirrorWG.Wait()
 
@@ -671,12 +674,10 @@ func (a *CodexAdapter) mirrorContext() context.Context {
 }
 
 func (a *CodexAdapter) isShuttingDown() bool {
-	select {
-	case <-a.closeCh:
-		return true
-	default:
-		return false
-	}
+	a.mu.Lock()
+	shuttingDown := a.shuttingDown
+	a.mu.Unlock()
+	return shuttingDown
 }
 
 func (a *CodexAdapter) readLoop(ctx context.Context) {
@@ -907,7 +908,14 @@ func (a *CodexAdapter) handleTurnFailed(params json.RawMessage) {
 // deliveries to exit cleanly, and is bound to `serviceCtx` so shutdown
 // cancels any pending Reply/SendMessage call.
 func (a *CodexAdapter) dispatchMirror(target codexMirrorTarget, turnID string, threadID string, text string) {
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return
+	}
 	a.mirrorWG.Add(1)
+	a.mu.Unlock()
+
 	go func() {
 		defer a.mirrorWG.Done()
 		ctx := a.mirrorContext()

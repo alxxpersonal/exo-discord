@@ -669,7 +669,10 @@ func TestCodexAdapterWaitForReconnectDelayReturnsCanceledWhenClosed(t *testing.T
 
 	closeCh := make(chan struct{})
 	close(closeCh)
-	adapter := &CodexAdapter{closeCh: closeCh}
+	adapter := &CodexAdapter{
+		closeCh:      closeCh,
+		shuttingDown: true,
+	}
 
 	if err := adapter.waitForReconnectDelay(context.Background(), 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForReconnectDelay(0) error = %v, want context.Canceled", err)
@@ -1839,6 +1842,7 @@ func TestCodexAdapterMirrorRespectsShutdown(t *testing.T) {
 	session := &blockingMirrorSession{
 		replyStarted: make(chan struct{}),
 		replyDone:    make(chan struct{}),
+		replyCalls:   make(chan struct{}, 2),
 	}
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	defer serviceCancel()
@@ -1878,6 +1882,7 @@ func TestCodexAdapterMirrorRespectsShutdown(t *testing.T) {
 	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
 
 	<-session.replyStarted
+	<-session.replyCalls
 
 	closeErrCh := make(chan error, 1)
 	go func() { closeErrCh <- adapter.Close() }()
@@ -1899,6 +1904,14 @@ func TestCodexAdapterMirrorRespectsShutdown(t *testing.T) {
 
 	if got := session.sendCount.Load(); got != 0 {
 		t.Fatalf("send count = %d, want 0", got)
+	}
+
+	adapter.dispatchMirror(codexMirrorTarget{ChannelID: "chan-1", MessageID: "msg-in"}, "turn-after-close", "thread-slow", "late reply")
+
+	select {
+	case <-session.replyCalls:
+		t.Fatal("dispatchMirror launched after Close() returned")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
