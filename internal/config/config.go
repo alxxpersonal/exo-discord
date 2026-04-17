@@ -244,11 +244,12 @@ type ChannelClaudeConfig struct {
 
 // ChannelCodexConfig stores Codex bridge settings.
 type ChannelCodexConfig struct {
-	Transport       string `toml:"transport"`
-	SocketPath      string `toml:"socket_path"`
-	WebsocketURL    string `toml:"websocket_url"`
-	ThreadID        string `toml:"thread_id"`
-	MirrorResponses bool   `toml:"mirror_responses"`
+	Transport        string `toml:"transport"`
+	SocketPath       string `toml:"socket_path"`
+	WebsocketURL     string `toml:"websocket_url"`
+	ThreadID         string `toml:"thread_id"`
+	MirrorResponses  bool   `toml:"mirror_responses"`
+	AutoCreateThread bool   `toml:"auto_create_thread"`
 }
 
 // DownloadConfig stores attachment download settings.
@@ -312,9 +313,10 @@ func defaultConfig(homeDir string) Config {
 				PermissionRelay: false,
 			},
 			Codex: ChannelCodexConfig{
-				Transport:       "unix",
-				SocketPath:      filepath.Join(homeDir, ".codex", "sessions", "default", "broker.sock"),
-				MirrorResponses: true,
+				Transport:        "unix",
+				SocketPath:       filepath.Join(homeDir, ".codex", "sessions", "default", "broker.sock"),
+				MirrorResponses:  true,
+				AutoCreateThread: true,
 			},
 		},
 		Downloads: DownloadConfig{
