@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"sort"
@@ -231,11 +232,18 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 
 	formatted := formatCodexInput(event)
 	started, err := a.startTurn(ctx, threadID, formatted)
-	if err != nil && !explicit && isThreadNotFoundError(err) {
-		threadID, err = a.threadStore.DiscoverActiveThread(ctx)
-		if err != nil {
-			return fmt.Errorf("rediscover codex thread after thread not found: %w", err)
+	if err != nil && isThreadNotFoundError(err) {
+		discoveredThreadID, discoverErr := a.threadStore.DiscoverActiveThread(ctx)
+		if discoverErr != nil {
+			return fmt.Errorf("rediscover codex thread after thread not found: %w", discoverErr)
 		}
+		if explicit {
+			slog.Warn("config thread_id stale, rediscovering", "thread_id", threadID, "discovered_thread_id", discoveredThreadID)
+			a.mu.Lock()
+			a.threadID = discoveredThreadID
+			a.mu.Unlock()
+		}
+		threadID = discoveredThreadID
 		if saveErr := a.threadStore.SaveThread(threadID); saveErr != nil {
 			return fmt.Errorf("save rediscovered codex thread: %w", saveErr)
 		}
@@ -592,8 +600,12 @@ func (a *CodexAdapter) write(ctx context.Context, message codexRequestMessage) e
 // --- Thread Helpers ---
 
 func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, error) {
-	if a.threadID != "" {
-		return a.threadID, true, nil
+	a.mu.Lock()
+	threadID := a.threadID
+	a.mu.Unlock()
+
+	if threadID != "" {
+		return threadID, true, nil
 	}
 	if saved, ok := a.threadStore.LoadThread(); ok {
 		return saved, false, nil

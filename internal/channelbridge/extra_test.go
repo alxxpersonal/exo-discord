@@ -716,6 +716,238 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 	<-done
 }
 
+func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) {
+	t.Parallel()
+
+	socketPath := "/tmp/exo-discord-explicit-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".sock"
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 5; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				if method != "initialize" {
+					t.Errorf("step 0 method = %q, want initialize", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				if method != "initialized" {
+					t.Errorf("step 1 method = %q, want initialized", method)
+					return
+				}
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-stale" {
+					t.Errorf("stale threadId = %#v, want thread-stale", params["threadId"])
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/list" {
+					t.Errorf("step 3 method = %q, want thread/list", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"data": []map[string]any{
+						{
+							"id":        "thread-new",
+							"updatedAt": 3,
+							"status": map[string]any{
+								"type": "active",
+							},
+						},
+					},
+				})
+			case 4:
+				if method != "turn/start" {
+					t.Errorf("step 4 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-new" {
+					t.Errorf("rediscovered threadId = %#v, want thread-new", params["threadId"])
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"turn": map[string]any{
+						"id": "turn-1",
+					},
+				})
+			}
+		}
+	}()
+
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:  codexTransportUnix,
+		SocketPath: socketPath,
+		ThreadID:   "thread-stale",
+	}, HookEnv{
+		HomeDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	if adapter.threadID != "thread-new" {
+		t.Fatalf("threadID = %q, want thread-new", adapter.threadID)
+	}
+	if savedThreadID, ok := adapter.threadStore.LoadThread(); !ok || savedThreadID != "thread-new" {
+		t.Fatalf("saved thread = %q, %t, want thread-new, true", savedThreadID, ok)
+	}
+
+	<-done
+}
+
+func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testing.T) {
+	t.Parallel()
+
+	socketPath := "/tmp/exo-discord-explicit-fail-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".sock"
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 3; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				if method != "initialize" {
+					t.Errorf("step 0 method = %q, want initialize", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				if method != "initialized" {
+					t.Errorf("step 1 method = %q, want initialized", method)
+					return
+				}
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			}
+		}
+	}()
+
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:  codexTransportUnix,
+		SocketPath: socketPath,
+		ThreadID:   "thread-stale",
+	}, HookEnv{
+		HomeDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	adapter.threadStore = NewCodexThreadStore(t.TempDir(), fakeThreadProvider{
+		err: errors.New("no active codex threads found"),
+	})
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err == nil {
+		t.Fatal("Deliver() error = nil, want rediscovery failure")
+	}
+	if !strings.Contains(err.Error(), "rediscover codex thread after thread not found") {
+		t.Fatalf("Deliver() error = %v, want rediscovery context", err)
+	}
+	if !strings.Contains(err.Error(), "no active codex threads found") {
+		t.Fatalf("Deliver() error = %v, want discovery failure", err)
+	}
+
+	<-done
+}
+
 func TestLastCodexAgentMessageAndSplitDiscordChunks(t *testing.T) {
 	t.Parallel()
 
