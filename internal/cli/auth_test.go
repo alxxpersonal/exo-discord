@@ -535,7 +535,88 @@ func TestAuthLoginConsumesStateOnlyAfterSuccessfulExchange(t *testing.T) {
 	}
 }
 
+// --- C4: Multi-user token selection ---
+
+func TestResolveUserInstallUserIDFlag(t *testing.T) {
+	t.Parallel()
+
+	flag := "333"
+	env := Environment{userIDRef: &flag, LookupEnv: emptyLookupEnv}
+	got, err := resolveUserInstallUserID(env, []string{"111", "222", "333"})
+	if err != nil {
+		t.Fatalf("resolveUserInstallUserID() error = %v", err)
+	}
+	if got != "333" {
+		t.Fatalf("got = %q, want 333", got)
+	}
+}
+
+func TestResolveUserInstallUserIDEnvVar(t *testing.T) {
+	t.Parallel()
+
+	env := Environment{
+		LookupEnv: func(key string) (string, bool) {
+			if key == "EXO_DISCORD_USER_ID" {
+				return "222", true
+			}
+			return "", false
+		},
+	}
+	got, err := resolveUserInstallUserID(env, []string{"111", "222"})
+	if err != nil {
+		t.Fatalf("resolveUserInstallUserID() error = %v", err)
+	}
+	if got != "222" {
+		t.Fatalf("got = %q, want 222", got)
+	}
+}
+
+func TestResolveUserInstallUserIDAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	env := Environment{LookupEnv: emptyLookupEnv}
+	_, err := resolveUserInstallUserID(env, []string{"111", "222"})
+	if err == nil {
+		t.Fatal("resolveUserInstallUserID() error = nil, want ambiguous error")
+	}
+	if !strings.Contains(err.Error(), "111") || !strings.Contains(err.Error(), "222") {
+		t.Fatalf("error = %v, want listing of ids", err)
+	}
+	if !strings.Contains(err.Error(), "--as-user") || !strings.Contains(err.Error(), "EXO_DISCORD_USER_ID") {
+		t.Fatalf("error = %v, want selection hints", err)
+	}
+}
+
+func TestResolveUserInstallUserIDUnknown(t *testing.T) {
+	t.Parallel()
+
+	flag := "999"
+	env := Environment{userIDRef: &flag, LookupEnv: emptyLookupEnv}
+	_, err := resolveUserInstallUserID(env, []string{"111", "222"})
+	if err == nil {
+		t.Fatal("resolveUserInstallUserID() error = nil, want unknown id error")
+	}
+	if !strings.Contains(err.Error(), "no stored token") {
+		t.Fatalf("error = %v, want no-stored-token error", err)
+	}
+}
+
+func TestResolveUserInstallUserIDSingle(t *testing.T) {
+	t.Parallel()
+
+	env := Environment{LookupEnv: emptyLookupEnv}
+	got, err := resolveUserInstallUserID(env, []string{"111"})
+	if err != nil {
+		t.Fatalf("resolveUserInstallUserID() error = %v", err)
+	}
+	if got != "111" {
+		t.Fatalf("got = %q, want 111", got)
+	}
+}
+
 // --- Helpers ---
+
+func emptyLookupEnv(string) (string, bool) { return "", false }
 
 func oauthConfigBody(redirectBase string) string {
 	return strings.Join([]string{

@@ -31,11 +31,11 @@ func TestDefaultSessionFactory(t *testing.T) {
 		},
 		OAuthDirPath: filepath.Join(t.TempDir(), "oauth"),
 	}
-	if _, err := defaultSessionFactory(userInstall); err == nil || !strings.Contains(err.Error(), "no user-install tokens stored") {
+	if _, err := defaultSessionFactory(Environment{}, userInstall); err == nil || !strings.Contains(err.Error(), "no user-install tokens stored") {
 		t.Fatalf("defaultSessionFactory(user_install) error = %v, want missing tokens error", err)
 	}
 
-	session, err := defaultSessionFactory(config.ResolvedConfig{
+	session, err := defaultSessionFactory(Environment{}, config.ResolvedConfig{
 		Config: config.Config{Mode: config.ModeBot, BotToken: "secret"},
 	})
 	if err != nil {

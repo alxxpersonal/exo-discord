@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -314,10 +315,10 @@ func newAuthRevokeCommand(env Environment) *cobra.Command {
 
 // --- Session Factory Helpers ---
 
-// buildUserInstallSession constructs a user-install session using the first stored token.
-// If a user id is stored, the first (sorted) token is used. Multi-user selection is handled
-// by callers that know which user id to target.
-func buildUserInstallSession(resolved config.ResolvedConfig) (*userinstall.Session, error) {
+// buildUserInstallSession constructs a user-install session for the selected user id.
+// Selection precedence: --as-user flag, EXO_DISCORD_USER_ID env var, single stored token.
+// If multiple tokens exist and no selection is supplied, returns an error listing ids.
+func buildUserInstallSession(env Environment, resolved config.ResolvedConfig) (*userinstall.Session, error) {
 	oauthCfg, err := requireOAuthConfig(resolved)
 	if err != nil {
 		return nil, err
@@ -334,13 +335,53 @@ func buildUserInstallSession(resolved config.ResolvedConfig) (*userinstall.Sessi
 		return nil, errors.New("no user-install tokens stored; run `exo-discord auth login`")
 	}
 
+	selected, err := resolveUserInstallUserID(env, ids)
+	if err != nil {
+		return nil, err
+	}
+
 	refresher := userinstall.NewOAuthClient(oauthCfg, &http.Client{Timeout: 30 * time.Second})
 	return userinstall.NewSession(userinstall.Config{
-		UserID:     ids[0],
+		UserID:     selected,
 		Storage:    storage,
 		Refresher:  refresher,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 	})
+}
+
+// resolveUserInstallUserID picks a stored user id based on --as-user, EXO_DISCORD_USER_ID,
+// or the single stored token. Returns a helpful error when ambiguous.
+func resolveUserInstallUserID(env Environment, ids []string) (string, error) {
+	selection := ""
+	if env.userIDRef != nil {
+		selection = strings.TrimSpace(*env.userIDRef)
+	}
+	if selection == "" {
+		selection = strings.TrimSpace(env.UserIDOverride)
+	}
+	if selection == "" {
+		lookup := env.LookupEnv
+		if lookup == nil {
+			lookup = os.LookupEnv
+		}
+		if value, ok := lookup("EXO_DISCORD_USER_ID"); ok {
+			selection = strings.TrimSpace(value)
+		}
+	}
+
+	if selection != "" {
+		for _, id := range ids {
+			if id == selection {
+				return id, nil
+			}
+		}
+		return "", fmt.Errorf("user id %q has no stored token; available ids: %s", selection, strings.Join(ids, ", "))
+	}
+
+	if len(ids) == 1 {
+		return ids[0], nil
+	}
+	return "", fmt.Errorf("multiple user-install tokens stored (%s); select one with --as-user or EXO_DISCORD_USER_ID", strings.Join(ids, ", "))
 }
 
 // --- Helpers ---
