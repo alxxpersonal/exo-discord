@@ -2,7 +2,7 @@
 
 exo-discord uses the existing local Discord access manager before a message ever reaches Claude Code. Unknown DM senders are handled by pairing. Allowlisted users and enabled guild channels pass through. Channel messages still obey `require_mention` and the configured allowlists.
 
-All access state lives under `~/.exo-discord/`. Project config comes from the nearest `.exo-discord` file first, then `~/.exo-discord/config.toml`. Pairing state is persisted separately in `~/.exo-discord/access.json`. The runtime re-evaluates access on every inbound message, so local approvals and removals take effect without restarting the plugin.
+All access state lives under `~/.exo-discord/`. Project config comes from the nearest `.exo-discord` file first, then `~/.exo-discord/config.toml`. Pairing state is persisted separately in `~/.exo-discord/access.json`. Long-running runtimes watch both the active config file and the local access state with `github.com/fsnotify/fsnotify`, so local approvals and removals take effect on a running process without restart.
 
 The channel injection primitive matches the reverse-engineering artifact at `/Users/alxx/Library/Mobile Documents/iCloud~md~obsidian/Documents/nebula/00-The-Void/Artifacts/2026-04-17-claude-channel-injection-RE.md`: `notifications/claude/channel` over the existing MCP stdio pipe, with the server advertising `experimental["claude/channel"]`. Claude Code wraps the delivered content as a synthetic `<channel ...>` user turn.
 
@@ -15,6 +15,13 @@ The channel injection primitive matches the reverse-engineering artifact at `/Us
 | Pairing state | `~/.exo-discord/access.json` |
 | Channel audit log | `~/.exo-discord/channel-audit.log` |
 | Runtime audit log | `~/.exo-discord/audit.log` |
+| Hot reload window | about 100 ms after a local config or state change |
+
+## Hot Reload
+
+`exo-discord bot-mode`, `exo-discord channel-plugin`, and `exo-discord codex-bridge` all hot-reload access policy changes from disk. Config allowlist edits such as `allowed_user_ids` and `allowed_channel_ids`, plus persisted pairing approvals in `~/.exo-discord/access.json`, are picked up automatically by the running runtime after the watcher debounce window.
+
+The runtime audit log records successful reloads as `access_policy_reloaded` entries with a `source` field of `config` or `state`.
 
 ## DMs
 
@@ -31,6 +38,8 @@ Direct allowlist changes stay local:
 exo-discord access allow-user 221773638772129792
 exo-discord access remove-user 221773638772129792
 ```
+
+Those mutations take effect on running runtimes in about 100 ms.
 
 ## Guild Channels
 
