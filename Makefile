@@ -19,7 +19,7 @@ fmt: ## Format all Go files
 	gofmt -w .
 
 coverage: ## Run tests with coverage report
-	go test -race -coverprofile=coverage.out ./...
+	go test -race -coverprofile=coverage.out -coverpkg=./internal/... ./...
 	go tool cover -func=coverage.out | tail -1
 	@rm -f coverage.out
 
