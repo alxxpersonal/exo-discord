@@ -72,7 +72,10 @@ Codex maintains threads inside the app-server process a client is connected to. 
 4. If discovery is empty AND `--auto-create-thread` is on (default): call `thread/start` to open a brand new thread on the app-server, cache it, and retry `turn/start`.
 5. If `--no-auto-create-thread` (or `channel.codex.auto_create_thread = false`) is set and discovery is empty: fail with a clear error listing the recovery options.
 
-Every injection records `original_thread_id`, `final_thread_id`, `fallback_path` (`none | resume | discover | auto_create | error`), and `result` to the runtime slog stream and to `channel-audit.log`.
+Delivery outcomes are audited in two places with different coverage:
+
+- Runtime slog stream emits a full `codex delivery outcome` record on every attempt (success or failure) with `original_thread_id`, `final_thread_id`, `fallback_path` (`none | resume | discover | auto_create | cached | error`), and `result` (`success | error`).
+- `channel-audit.log` captures only successful injections and carries `original_thread_id`, `fallback_path`, plus the existing privacy-preserving meta keys (content hash, not content). Failures are not written here by design - check the slog stream or `~/.exo-discord/audit.log` for failure details.
 
 ## Development Activation
 

@@ -34,7 +34,7 @@ See `AGENTS.md` for agent execution rules.
 - Codex activation uses `codex app-server --listen ws://127.0.0.1:8765` or a known broker socket, then `exo-discord codex-bridge --transport ws --websocket-url ws://127.0.0.1:8765 --thread <id>` or the equivalent Unix socket flags.
 - Codex threads are app-server scoped: the interactive `codex` shell (source kind `cli`) and a standalone `codex app-server` are separate processes with separate loaded-thread tables. A `--thread` id from the interactive shell is not automatically visible to the app-server. The bridge recovers by calling `thread/resume` to rehydrate from shared `$CODEX_HOME/rollouts/`, then falling back to `thread/list` discovery, then to `thread/start` auto-create (default on, disable with `--no-auto-create-thread` or `channel.codex.auto_create_thread = false`).
 - Channel config lives under `[channel]` in `.exo-discord` or `~/.exo-discord/config.toml`. `channel.claude.permission_relay` controls the Claude permission capability declaration. `channel.codex.transport`, `socket_path`, `websocket_url`, `thread_id`, `mirror_responses`, and `auto_create_thread` control the Codex bridge defaults.
-- Channel bridge audit events append to `~/.exo-discord/channel-audit.log`. The existing runtime audit remains `~/.exo-discord/audit.log`.
+- Channel bridge audit events for successful injections append to `~/.exo-discord/channel-audit.log` with content hash and privacy-preserving meta keys (no full delivery record). Full per-attempt outcomes (success and failure, with `original_thread_id`, `final_thread_id`, `fallback_path`, `result`) go to the runtime slog stream. The existing runtime audit remains `~/.exo-discord/audit.log`.
 
 ### User-Install Mode
 
