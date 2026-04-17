@@ -95,8 +95,9 @@ func newRoleCreateCommand(env Environment) *cobra.Command {
 
 func newRoleUpdateCommand(env Environment) *cobra.Command {
 	var (
-		name  string
-		color string
+		guildID string
+		name    string
+		color   string
 	)
 
 	cmd := &cobra.Command{
@@ -110,8 +111,9 @@ func newRoleUpdateCommand(env Environment) *cobra.Command {
 			}
 
 			req := discord.RoleUpdateRequest{
-				RoleID: args[0],
-				Color:  colorValue,
+				GuildID: guildID,
+				RoleID:  args[0],
+				Color:   colorValue,
 			}
 			if cmd.Flags().Changed("name") {
 				req.Name = stringPointer(name)
@@ -127,13 +129,18 @@ func newRoleUpdateCommand(env Environment) *cobra.Command {
 		},
 	}
 
+	cmd.Flags().StringVar(&guildID, "guild", "", "discord guild id")
 	cmd.Flags().StringVar(&name, "name", "", "replacement role name")
 	cmd.Flags().StringVar(&color, "color", "", "replacement role color in #RRGGBB format")
+	markRequired(cmd, "guild")
 	return cmd
 }
 
 func newRoleDeleteCommand(env Environment) *cobra.Command {
-	var yes bool
+	var (
+		guildID string
+		yes     bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "delete <id>",
@@ -144,25 +151,29 @@ func newRoleDeleteCommand(env Environment) *cobra.Command {
 				return err
 			}
 			return withManager(env, func(ctx context.Context, manager discord.Manager) error {
-				if err := manager.DeleteRole(ctx, discord.RoleDeleteRequest{RoleID: args[0]}); err != nil {
+				if err := manager.DeleteRole(ctx, discord.RoleDeleteRequest{GuildID: guildID, RoleID: args[0]}); err != nil {
 					return err
 				}
 				return writeJSON(cmd.OutOrStdout(), map[string]any{
-					"ok":      true,
-					"role_id": args[0],
+					"guild_id": guildID,
+					"ok":       true,
+					"role_id":  args[0],
 				})
 			})
 		},
 	}
 
+	cmd.Flags().StringVar(&guildID, "guild", "", "discord guild id")
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm role deletion")
+	markRequired(cmd, "guild")
 	return cmd
 }
 
 func newRoleAssignCommand(env Environment) *cobra.Command {
 	var (
-		userID string
-		roleID string
+		guildID string
+		userID  string
+		roleID  string
 	)
 
 	cmd := &cobra.Command{
@@ -171,22 +182,26 @@ func newRoleAssignCommand(env Environment) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withManager(env, func(ctx context.Context, manager discord.Manager) error {
 				if err := manager.AssignRole(ctx, discord.RoleAssignmentRequest{
-					UserID: userID,
-					RoleID: roleID,
+					GuildID: guildID,
+					UserID:  userID,
+					RoleID:  roleID,
 				}); err != nil {
 					return err
 				}
 				return writeJSON(cmd.OutOrStdout(), map[string]any{
-					"ok":      true,
-					"user_id": userID,
-					"role_id": roleID,
+					"guild_id": guildID,
+					"ok":       true,
+					"user_id":  userID,
+					"role_id":  roleID,
 				})
 			})
 		},
 	}
 
+	cmd.Flags().StringVar(&guildID, "guild", "", "discord guild id")
 	cmd.Flags().StringVar(&userID, "user", "", "discord user id")
 	cmd.Flags().StringVar(&roleID, "role", "", "discord role id")
+	markRequired(cmd, "guild")
 	markRequired(cmd, "user")
 	markRequired(cmd, "role")
 	return cmd
@@ -194,8 +209,9 @@ func newRoleAssignCommand(env Environment) *cobra.Command {
 
 func newRoleUnassignCommand(env Environment) *cobra.Command {
 	var (
-		userID string
-		roleID string
+		guildID string
+		userID  string
+		roleID  string
 	)
 
 	cmd := &cobra.Command{
@@ -204,22 +220,26 @@ func newRoleUnassignCommand(env Environment) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withManager(env, func(ctx context.Context, manager discord.Manager) error {
 				if err := manager.UnassignRole(ctx, discord.RoleAssignmentRequest{
-					UserID: userID,
-					RoleID: roleID,
+					GuildID: guildID,
+					UserID:  userID,
+					RoleID:  roleID,
 				}); err != nil {
 					return err
 				}
 				return writeJSON(cmd.OutOrStdout(), map[string]any{
-					"ok":      true,
-					"user_id": userID,
-					"role_id": roleID,
+					"guild_id": guildID,
+					"ok":       true,
+					"user_id":  userID,
+					"role_id":  roleID,
 				})
 			})
 		},
 	}
 
+	cmd.Flags().StringVar(&guildID, "guild", "", "discord guild id")
 	cmd.Flags().StringVar(&userID, "user", "", "discord user id")
 	cmd.Flags().StringVar(&roleID, "role", "", "discord role id")
+	markRequired(cmd, "guild")
 	markRequired(cmd, "user")
 	markRequired(cmd, "role")
 	return cmd

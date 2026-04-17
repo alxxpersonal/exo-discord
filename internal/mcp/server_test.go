@@ -607,10 +607,10 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-role-update",
 			tool: "manage_role_update",
-			args: map[string]any{"role_id": "role-1", "name": "ops-2"},
+			args: map[string]any{"guild_id": "guild-1", "role_id": "role-1", "name": "ops-2"},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
-				if session.roleUpdate.RoleID != "role-1" || session.roleUpdate.Name == nil || *session.roleUpdate.Name != "ops-2" {
+				if session.roleUpdate.GuildID != "guild-1" || session.roleUpdate.RoleID != "role-1" || session.roleUpdate.Name == nil || *session.roleUpdate.Name != "ops-2" {
 					t.Fatalf("roleUpdate = %#v", session.roleUpdate)
 				}
 			},
@@ -618,10 +618,10 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-role-delete",
 			tool: "manage_role_delete",
-			args: map[string]any{"role_id": "role-1", "confirm": true},
+			args: map[string]any{"guild_id": "guild-1", "role_id": "role-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
-				if session.roleDelete.RoleID != "role-1" {
+				if session.roleDelete.GuildID != "guild-1" || session.roleDelete.RoleID != "role-1" {
 					t.Fatalf("roleDelete = %#v", session.roleDelete)
 				}
 			},
@@ -629,10 +629,10 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-role-assign",
 			tool: "manage_role_assign",
-			args: map[string]any{"user_id": "user-1", "role_id": "role-1"},
+			args: map[string]any{"guild_id": "guild-1", "user_id": "user-1", "role_id": "role-1"},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
-				if session.roleAssign.UserID != "user-1" || session.roleAssign.RoleID != "role-1" {
+				if session.roleAssign.GuildID != "guild-1" || session.roleAssign.UserID != "user-1" || session.roleAssign.RoleID != "role-1" {
 					t.Fatalf("roleAssign = %#v", session.roleAssign)
 				}
 			},
@@ -640,10 +640,10 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-role-unassign",
 			tool: "manage_role_unassign",
-			args: map[string]any{"user_id": "user-1", "role_id": "role-1"},
+			args: map[string]any{"guild_id": "guild-1", "user_id": "user-1", "role_id": "role-1"},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
-				if session.roleAssign.UserID != "user-1" || session.roleAssign.RoleID != "role-1" {
+				if session.roleAssign.GuildID != "guild-1" || session.roleAssign.UserID != "user-1" || session.roleAssign.RoleID != "role-1" {
 					t.Fatalf("roleAssign = %#v", session.roleAssign)
 				}
 			},

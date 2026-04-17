@@ -181,16 +181,16 @@ func TestDiscordGoManagerOperations(t *testing.T) {
 	if _, err := manager.CreateRole(context.Background(), discord.RoleCreateRequest{GuildID: "guild-1", Name: "ops", Color: intPointer(1), Hoist: boolPointer(true), Mentionable: boolPointer(true)}); err != nil {
 		t.Fatalf("CreateRole() error = %v", err)
 	}
-	if _, err := manager.UpdateRole(context.Background(), discord.RoleUpdateRequest{RoleID: "role-1", Name: stringPointer("ops-2"), Color: intPointer(2)}); err != nil {
+	if _, err := manager.UpdateRole(context.Background(), discord.RoleUpdateRequest{GuildID: "guild-1", RoleID: "role-1", Name: stringPointer("ops-2"), Color: intPointer(2)}); err != nil {
 		t.Fatalf("UpdateRole() error = %v", err)
 	}
-	if err := manager.DeleteRole(context.Background(), discord.RoleDeleteRequest{RoleID: "role-1"}); err != nil {
+	if err := manager.DeleteRole(context.Background(), discord.RoleDeleteRequest{GuildID: "guild-1", RoleID: "role-1"}); err != nil {
 		t.Fatalf("DeleteRole() error = %v", err)
 	}
-	if err := manager.AssignRole(context.Background(), discord.RoleAssignmentRequest{UserID: "user-1", RoleID: "role-1"}); err != nil {
+	if err := manager.AssignRole(context.Background(), discord.RoleAssignmentRequest{GuildID: "guild-1", UserID: "user-1", RoleID: "role-1"}); err != nil {
 		t.Fatalf("AssignRole() error = %v", err)
 	}
-	if err := manager.UnassignRole(context.Background(), discord.RoleAssignmentRequest{UserID: "user-1", RoleID: "role-1"}); err != nil {
+	if err := manager.UnassignRole(context.Background(), discord.RoleAssignmentRequest{GuildID: "guild-1", UserID: "user-1", RoleID: "role-1"}); err != nil {
 		t.Fatalf("UnassignRole() error = %v", err)
 	}
 	if err := manager.KickMember(context.Background(), discord.GuildUserRequest{GuildID: "guild-1", UserID: "user-1"}); err != nil {
@@ -384,6 +384,55 @@ func TestDiscordGoManagerInteractionHandlersUseOpenContextAndCloseWaits(t *testi
 	case <-finished:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timed out waiting for handler finish")
+	}
+}
+
+func TestDiscordGoManagerRoleOperationsRequireGuildID(t *testing.T) {
+	t.Parallel()
+
+	manager := &DiscordGoManager{}
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "update",
+			run: func() error {
+				_, err := manager.UpdateRole(context.Background(), discord.RoleUpdateRequest{RoleID: "role-1"})
+				return err
+			},
+		},
+		{
+			name: "delete",
+			run: func() error {
+				return manager.DeleteRole(context.Background(), discord.RoleDeleteRequest{RoleID: "role-1"})
+			},
+		},
+		{
+			name: "assign",
+			run: func() error {
+				return manager.AssignRole(context.Background(), discord.RoleAssignmentRequest{UserID: "user-1", RoleID: "role-1"})
+			},
+		},
+		{
+			name: "unassign",
+			run: func() error {
+				return manager.UnassignRole(context.Background(), discord.RoleAssignmentRequest{UserID: "user-1", RoleID: "role-1"})
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.run()
+			if err == nil || !strings.Contains(err.Error(), `requires guild_id for role "role-1"`) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 

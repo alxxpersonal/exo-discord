@@ -364,8 +364,7 @@ func (m *DiscordGoManager) CreateRole(ctx context.Context, req discord.RoleCreat
 
 // UpdateRole updates a guild role.
 func (m *DiscordGoManager) UpdateRole(ctx context.Context, req discord.RoleUpdateRequest) (discord.GuildRole, error) {
-	guildID, err := m.resolveRoleGuildID(ctx, req.GuildID, req.RoleID)
-	if err != nil {
+	if err := requireRoleGuildID(req.GuildID, req.RoleID, "update"); err != nil {
 		return discord.GuildRole{}, err
 	}
 
@@ -378,22 +377,21 @@ func (m *DiscordGoManager) UpdateRole(ctx context.Context, req discord.RoleUpdat
 		params.Name = *req.Name
 	}
 
-	role, err := m.session.GuildRoleEdit(guildID, req.RoleID, params, discordgo.WithContext(ctx))
+	role, err := m.session.GuildRoleEdit(req.GuildID, req.RoleID, params, discordgo.WithContext(ctx))
 	if err != nil {
 		return discord.GuildRole{}, fmt.Errorf("failed to update role: %w", err)
 	}
 
-	return mapRole(guildID, role), nil
+	return mapRole(req.GuildID, role), nil
 }
 
 // DeleteRole deletes a guild role.
 func (m *DiscordGoManager) DeleteRole(ctx context.Context, req discord.RoleDeleteRequest) error {
-	guildID, err := m.resolveRoleGuildID(ctx, req.GuildID, req.RoleID)
-	if err != nil {
+	if err := requireRoleGuildID(req.GuildID, req.RoleID, "delete"); err != nil {
 		return err
 	}
 
-	if err := m.session.GuildRoleDelete(guildID, req.RoleID, discordgo.WithContext(ctx)); err != nil {
+	if err := m.session.GuildRoleDelete(req.GuildID, req.RoleID, discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("failed to delete role: %w", err)
 	}
 	return nil
@@ -401,12 +399,11 @@ func (m *DiscordGoManager) DeleteRole(ctx context.Context, req discord.RoleDelet
 
 // AssignRole assigns a role to a guild member.
 func (m *DiscordGoManager) AssignRole(ctx context.Context, req discord.RoleAssignmentRequest) error {
-	guildID, err := m.resolveRoleGuildID(ctx, req.GuildID, req.RoleID)
-	if err != nil {
+	if err := requireRoleGuildID(req.GuildID, req.RoleID, "assign"); err != nil {
 		return err
 	}
 
-	if err := m.session.GuildMemberRoleAdd(guildID, req.UserID, req.RoleID, discordgo.WithContext(ctx)); err != nil {
+	if err := m.session.GuildMemberRoleAdd(req.GuildID, req.UserID, req.RoleID, discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("failed to assign role: %w", err)
 	}
 	return nil
@@ -414,12 +411,11 @@ func (m *DiscordGoManager) AssignRole(ctx context.Context, req discord.RoleAssig
 
 // UnassignRole removes a role from a guild member.
 func (m *DiscordGoManager) UnassignRole(ctx context.Context, req discord.RoleAssignmentRequest) error {
-	guildID, err := m.resolveRoleGuildID(ctx, req.GuildID, req.RoleID)
-	if err != nil {
+	if err := requireRoleGuildID(req.GuildID, req.RoleID, "unassign"); err != nil {
 		return err
 	}
 
-	if err := m.session.GuildMemberRoleRemove(guildID, req.UserID, req.RoleID, discordgo.WithContext(ctx)); err != nil {
+	if err := m.session.GuildMemberRoleRemove(req.GuildID, req.UserID, req.RoleID, discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("failed to unassign role: %w", err)
 	}
 	return nil
@@ -797,42 +793,6 @@ func (m *DiscordGoManager) waitForInteractionHandlers() {
 	m.interactionWG.Wait()
 }
 
-func (m *DiscordGoManager) resolveRoleGuildID(ctx context.Context, guildID string, roleID string) (string, error) {
-	if strings.TrimSpace(guildID) != "" {
-		return guildID, nil
-	}
-
-	after := ""
-	for {
-		guilds, err := m.session.UserGuilds(200, "", after, false, discordgo.WithContext(ctx))
-		if err != nil {
-			return "", fmt.Errorf("failed to list guilds for role resolution: %w", err)
-		}
-		if len(guilds) == 0 {
-			break
-		}
-
-		for _, guild := range guilds {
-			roles, err := m.session.GuildRoles(guild.ID, discordgo.WithContext(ctx))
-			if err != nil {
-				return "", fmt.Errorf("failed to list roles for guild %s: %w", guild.ID, err)
-			}
-			for _, role := range roles {
-				if role.ID == roleID {
-					return guild.ID, nil
-				}
-			}
-		}
-
-		after = guilds[len(guilds)-1].ID
-		if len(guilds) < 200 {
-			break
-		}
-	}
-
-	return "", fmt.Errorf("failed to resolve guild for role %s", roleID)
-}
-
 func (m *DiscordGoManager) editMessageComponents(
 	ctx context.Context,
 	channelID string,
@@ -1046,6 +1006,13 @@ func maxInt(left int, right int) int {
 		return left
 	}
 	return right
+}
+
+func requireRoleGuildID(guildID string, roleID string, action string) error {
+	if strings.TrimSpace(guildID) != "" {
+		return nil
+	}
+	return fmt.Errorf("role %s requires guild_id for role %q", action, roleID)
 }
 
 // --- Permission Constants ---

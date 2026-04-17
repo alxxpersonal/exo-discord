@@ -351,40 +351,40 @@ func TestManageCommandDispatchesSubcommands(t *testing.T) {
 		},
 		{
 			name: "role-update",
-			args: []string{"role", "update", "role-1", "--name", "staff-2", "--color", "#654321"},
+			args: []string{"role", "update", "role-1", "--guild", "guild-1", "--name", "staff-2", "--color", "#654321"},
 			check: func(t *testing.T, manager *fakeManager, stdout string) {
 				t.Helper()
-				if manager.roleUpdate.RoleID != "role-1" || manager.roleUpdate.Name == nil || *manager.roleUpdate.Name != "staff-2" {
+				if manager.roleUpdate.GuildID != "guild-1" || manager.roleUpdate.RoleID != "role-1" || manager.roleUpdate.Name == nil || *manager.roleUpdate.Name != "staff-2" {
 					t.Fatalf("roleUpdate=%#v", manager.roleUpdate)
 				}
 			},
 		},
 		{
 			name: "role-delete",
-			args: []string{"role", "delete", "role-1", "--yes"},
+			args: []string{"role", "delete", "role-1", "--guild", "guild-1", "--yes"},
 			check: func(t *testing.T, manager *fakeManager, stdout string) {
 				t.Helper()
-				if manager.roleDelete.RoleID != "role-1" {
+				if manager.roleDelete.GuildID != "guild-1" || manager.roleDelete.RoleID != "role-1" {
 					t.Fatalf("roleDelete=%#v", manager.roleDelete)
 				}
 			},
 		},
 		{
 			name: "role-assign",
-			args: []string{"role", "assign", "--user", "user-1", "--role", "role-1"},
+			args: []string{"role", "assign", "--guild", "guild-1", "--user", "user-1", "--role", "role-1"},
 			check: func(t *testing.T, manager *fakeManager, stdout string) {
 				t.Helper()
-				if manager.roleAssign.UserID != "user-1" || manager.roleAssign.RoleID != "role-1" {
+				if manager.roleAssign.GuildID != "guild-1" || manager.roleAssign.UserID != "user-1" || manager.roleAssign.RoleID != "role-1" {
 					t.Fatalf("roleAssign=%#v", manager.roleAssign)
 				}
 			},
 		},
 		{
 			name: "role-unassign",
-			args: []string{"role", "unassign", "--user", "user-1", "--role", "role-1"},
+			args: []string{"role", "unassign", "--guild", "guild-1", "--user", "user-1", "--role", "role-1"},
 			check: func(t *testing.T, manager *fakeManager, stdout string) {
 				t.Helper()
-				if manager.roleAssign.UserID != "user-1" || manager.roleAssign.RoleID != "role-1" {
+				if manager.roleAssign.GuildID != "guild-1" || manager.roleAssign.UserID != "user-1" || manager.roleAssign.RoleID != "role-1" {
 					t.Fatalf("roleAssign=%#v", manager.roleAssign)
 				}
 			},
@@ -560,7 +560,7 @@ func TestManageCommandRequiresYesForDestructiveActions(t *testing.T) {
 		args []string
 	}{
 		{name: "channel-delete", args: []string{"channel", "delete", "chan-1"}},
-		{name: "role-delete", args: []string{"role", "delete", "role-1"}},
+		{name: "role-delete", args: []string{"role", "delete", "role-1", "--guild", "guild-1"}},
 		{name: "member-ban", args: []string{"member", "ban", "user-1", "--guild", "guild-1"}},
 		{name: "message-delete", args: []string{"message", "delete", "msg-1", "--channel", "chan-1"}},
 		{name: "message-bulk-delete", args: []string{"message", "bulk-delete", "--channel", "chan-1", "--user", "user-1"}},

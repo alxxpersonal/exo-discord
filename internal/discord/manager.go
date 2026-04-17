@@ -166,7 +166,7 @@ type RoleCreateRequest struct {
 
 // RoleUpdateRequest stores an update-role request.
 type RoleUpdateRequest struct {
-	GuildID     string  `json:"guild_id,omitempty"`
+	GuildID     string  `json:"guild_id"`
 	RoleID      string  `json:"role_id"`
 	Name        *string `json:"name,omitempty"`
 	Color       *int    `json:"color,omitempty"`
@@ -176,13 +176,13 @@ type RoleUpdateRequest struct {
 
 // RoleDeleteRequest stores a delete-role request.
 type RoleDeleteRequest struct {
-	GuildID string `json:"guild_id,omitempty"`
+	GuildID string `json:"guild_id"`
 	RoleID  string `json:"role_id"`
 }
 
 // RoleAssignmentRequest stores a role assignment request.
 type RoleAssignmentRequest struct {
-	GuildID string `json:"guild_id,omitempty"`
+	GuildID string `json:"guild_id"`
 	UserID  string `json:"user_id"`
 	RoleID  string `json:"role_id"`
 }

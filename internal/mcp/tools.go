@@ -150,7 +150,7 @@ type roleCreateArgs struct {
 }
 
 type roleUpdateArgs struct {
-	GuildID     string `json:"guild_id,omitempty" jsonschema:"Optional discord guild id"`
+	GuildID     string `json:"guild_id" jsonschema:"Discord guild id"`
 	RoleID      string `json:"role_id" jsonschema:"Discord role id"`
 	Name        string `json:"name,omitempty" jsonschema:"Replacement role name"`
 	Color       *int   `json:"color,omitempty" jsonschema:"Replacement role color as decimal int"`
@@ -159,7 +159,7 @@ type roleUpdateArgs struct {
 }
 
 type roleDeleteArgs struct {
-	GuildID string `json:"guild_id,omitempty" jsonschema:"Optional discord guild id"`
+	GuildID string `json:"guild_id" jsonschema:"Discord guild id"`
 	RoleID  string `json:"role_id" jsonschema:"Discord role id"`
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
@@ -171,7 +171,7 @@ type memberActionArgs struct {
 }
 
 type roleAssignArgs struct {
-	GuildID string `json:"guild_id,omitempty" jsonschema:"Optional discord guild id"`
+	GuildID string `json:"guild_id" jsonschema:"Discord guild id"`
 	UserID  string `json:"user_id" jsonschema:"Discord user id"`
 	RoleID  string `json:"role_id" jsonschema:"Discord role id"`
 }
