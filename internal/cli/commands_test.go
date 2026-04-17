@@ -162,6 +162,140 @@ func (f *fakeSession) StatusRequest() discordpkg.StatusRequest {
 	return f.statusRequest
 }
 
+type fakeManager struct {
+	mu         sync.RWMutex
+	openCount  int
+	closeCount int
+}
+
+func (f *fakeManager) Open(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openCount++
+	return nil
+}
+
+func (f *fakeManager) Close(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeCount++
+	return nil
+}
+
+func (f *fakeManager) Mode() string { return "bot" }
+
+func (f *fakeManager) SubscribeInteractions(discordpkg.InteractionHandler) func() { return func() {} }
+
+func (f *fakeManager) GetGuild(context.Context, string) (discordpkg.GuildInfo, error) {
+	return discordpkg.GuildInfo{}, nil
+}
+
+func (f *fakeManager) ListChannels(context.Context, string) ([]discordpkg.GuildChannel, error) {
+	return nil, nil
+}
+
+func (f *fakeManager) ListRoles(context.Context, string) ([]discordpkg.GuildRole, error) {
+	return nil, nil
+}
+
+func (f *fakeManager) ListMembers(context.Context, discordpkg.ListMembersRequest) ([]discordpkg.GuildMember, error) {
+	return nil, nil
+}
+
+func (f *fakeManager) GetMember(context.Context, discordpkg.GetMemberRequest) (discordpkg.GuildMember, error) {
+	return discordpkg.GuildMember{}, nil
+}
+
+func (f *fakeManager) CreateChannel(context.Context, discordpkg.ChannelCreateRequest) (discordpkg.GuildChannel, error) {
+	return discordpkg.GuildChannel{}, nil
+}
+
+func (f *fakeManager) UpdateChannel(context.Context, discordpkg.ChannelUpdateRequest) (discordpkg.GuildChannel, error) {
+	return discordpkg.GuildChannel{}, nil
+}
+
+func (f *fakeManager) DeleteChannel(context.Context, string) error { return nil }
+
+func (f *fakeManager) SetChannelPermission(context.Context, discordpkg.ChannelPermissionSetRequest) error {
+	return nil
+}
+
+func (f *fakeManager) RemoveChannelPermission(context.Context, discordpkg.ChannelPermissionRemoveRequest) error {
+	return nil
+}
+
+func (f *fakeManager) CreateRole(context.Context, discordpkg.RoleCreateRequest) (discordpkg.GuildRole, error) {
+	return discordpkg.GuildRole{}, nil
+}
+
+func (f *fakeManager) UpdateRole(context.Context, discordpkg.RoleUpdateRequest) (discordpkg.GuildRole, error) {
+	return discordpkg.GuildRole{}, nil
+}
+
+func (f *fakeManager) DeleteRole(context.Context, discordpkg.RoleDeleteRequest) error { return nil }
+
+func (f *fakeManager) AssignRole(context.Context, discordpkg.RoleAssignmentRequest) error { return nil }
+
+func (f *fakeManager) UnassignRole(context.Context, discordpkg.RoleAssignmentRequest) error {
+	return nil
+}
+
+func (f *fakeManager) KickMember(context.Context, discordpkg.GuildUserRequest) error { return nil }
+
+func (f *fakeManager) BanMember(context.Context, discordpkg.GuildUserRequest) error { return nil }
+
+func (f *fakeManager) SendManagedMessage(context.Context, discordpkg.SendRequest) (discordpkg.SentMessage, error) {
+	return discordpkg.SentMessage{}, nil
+}
+
+func (f *fakeManager) EditManagedMessage(context.Context, discordpkg.EditRequest) (discordpkg.SentMessage, error) {
+	return discordpkg.SentMessage{}, nil
+}
+
+func (f *fakeManager) DeleteManagedMessage(context.Context, discordpkg.MessageTarget) error {
+	return nil
+}
+
+func (f *fakeManager) BulkDeleteMessages(context.Context, discordpkg.BulkDeleteRequest) (discordpkg.BulkDeleteResult, error) {
+	return discordpkg.BulkDeleteResult{}, nil
+}
+
+func (f *fakeManager) ReactToManagedMessage(context.Context, discordpkg.ReactRequest) error {
+	return nil
+}
+
+func (f *fakeManager) PostEmbed(context.Context, discordpkg.EmbedPostRequest) (discordpkg.SentMessage, error) {
+	return discordpkg.SentMessage{}, nil
+}
+
+func (f *fakeManager) AddButton(context.Context, discordpkg.ButtonAddRequest) (discordpkg.SentMessage, error) {
+	return discordpkg.SentMessage{}, nil
+}
+
+func (f *fakeManager) AddSelect(context.Context, discordpkg.SelectAddRequest) (discordpkg.SentMessage, error) {
+	return discordpkg.SentMessage{}, nil
+}
+
+func (f *fakeManager) RespondInteraction(context.Context, discordpkg.InteractionResponseRequest) error {
+	return nil
+}
+
+func (f *fakeManager) REST(context.Context, discordpkg.RESTRequest) (discordpkg.RESTResponse, error) {
+	return discordpkg.RESTResponse{}, nil
+}
+
+func (f *fakeManager) OpenCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.openCount
+}
+
+func (f *fakeManager) CloseCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.closeCount
+}
+
 type fakeMCPServer struct {
 	runCount int
 }
@@ -215,6 +349,7 @@ func TestRootCommandRegistersSpecCommands(t *testing.T) {
 		"configure",
 		"doctor",
 		"send",
+		"manage",
 		"listen",
 		"bot-mode",
 		"access",
@@ -485,6 +620,7 @@ func TestMCPServeCommandOpensSessionAndRunsServer(t *testing.T) {
 	writeProjectConfig(t, startDir, "mode = \"bot\"\nbot_token = \"secret\"\nmcp_enabled = true\n")
 
 	session := &fakeSession{}
+	manager := &fakeManager{}
 	server := &fakeMCPServer{}
 	env := Environment{
 		StartDir: startDir,
@@ -494,7 +630,10 @@ func TestMCPServeCommandOpensSessionAndRunsServer(t *testing.T) {
 		NewSession: func(config.ResolvedConfig) (discordpkg.Session, error) {
 			return session, nil
 		},
-		NewMCPServer: func(discordpkg.Session) mcpServer {
+		NewManager: func(config.ResolvedConfig) (discordpkg.Manager, error) {
+			return manager, nil
+		},
+		NewMCPServer: func(discordpkg.Session, discordpkg.Manager) mcpServer {
 			return server
 		},
 	}
@@ -509,6 +648,12 @@ func TestMCPServeCommandOpensSessionAndRunsServer(t *testing.T) {
 	closeCount := session.CloseCount()
 	if openCount != 1 || closeCount != 1 {
 		t.Fatalf("session open=%d close=%d, want 1/1", openCount, closeCount)
+	}
+	if got, want := manager.OpenCount(), 1; got != want {
+		t.Fatalf("manager open count = %d, want %d", got, want)
+	}
+	if got, want := manager.CloseCount(), 1; got != want {
+		t.Fatalf("manager close count = %d, want %d", got, want)
 	}
 	if server.runCount != 1 {
 		t.Fatalf("server run count = %d, want 1", server.runCount)
