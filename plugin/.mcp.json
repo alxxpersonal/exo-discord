@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "exo-discord": {
+      "command": "exo-discord",
+      "args": ["channel-plugin"]
+    }
+  }
+}

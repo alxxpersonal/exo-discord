@@ -1,0 +1,8 @@
+{
+  "name": "exo-discord",
+  "version": "0.1.0",
+  "description": "Discord channel plugin for Claude Code with local access control and direct channel injection.",
+  "homepage": "https://github.com/alxxpersonal/exo-discord",
+  "license": "MIT",
+  "entry": "channel-plugin"
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/alxxpersonal/exo-discord/internal/channelbridge"
 	"github.com/alxxpersonal/exo-discord/internal/config"
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
 	botpkg "github.com/alxxpersonal/exo-discord/internal/discord/bot"
@@ -20,20 +21,21 @@ import (
 
 // Environment holds CLI dependencies and io handles.
 type Environment struct {
-	StartDir       string
-	HomeDir        string
-	Stdin          io.Reader
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Context        func() context.Context
-	DiscoverConfig func(string, string) (config.ResolvedConfig, error)
-	NewSession     func(config.ResolvedConfig) (discordpkg.Session, error)
-	NewManager     func(config.ResolvedConfig) (discordpkg.Manager, error)
-	NewMCPServer   func(discordpkg.Session, discordpkg.Manager) mcpServer
-	ListenRunner   listenRunner
-	BotModeRunner  botModeRunner
-	OAuthOverride  oauthEndpointOverride
-	OAuthAPIBase   string
+	StartDir          string
+	HomeDir           string
+	Stdin             io.Reader
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Context           func() context.Context
+	DiscoverConfig    func(string, string) (config.ResolvedConfig, error)
+	NewSession        func(config.ResolvedConfig) (discordpkg.Session, error)
+	NewManager        func(config.ResolvedConfig) (discordpkg.Manager, error)
+	NewMCPServer      func(discordpkg.Session, discordpkg.Manager) mcpServer
+	NewChannelAdapter func(channelbridge.Config, channelbridge.HookEnv) (channelAdapter, error)
+	ListenRunner      listenRunner
+	BotModeRunner     botModeRunner
+	OAuthOverride     oauthEndpointOverride
+	OAuthAPIBase      string
 	// OAuthStateSeed is an optional test hook to force a deterministic oauth state.
 	OAuthStateSeed string
 	// UserIDOverride forces a specific user id when building a user-install session.
@@ -56,6 +58,12 @@ type oauthEndpointOverride struct {
 
 type mcpServer interface {
 	Run(context.Context) error
+}
+
+type channelAdapter interface {
+	Name() string
+	Deliver(context.Context, channelbridge.Event) error
+	Close() error
 }
 
 type listenRequest struct {
@@ -132,6 +140,11 @@ func (env Environment) withDefaults() Environment {
 			return mcppkg.NewServer(session, manager)
 		}
 	}
+	if env.NewChannelAdapter == nil {
+		env.NewChannelAdapter = func(cfg channelbridge.Config, hookEnv channelbridge.HookEnv) (channelAdapter, error) {
+			return channelbridge.NewAdapter(cfg, hookEnv)
+		}
+	}
 	if env.ListenRunner == nil {
 		env.ListenRunner = defaultListenRunner{}
 	}
@@ -174,6 +187,8 @@ func NewRootCommand(env Environment) *cobra.Command {
 	root.AddCommand(newAccessCommand(env))
 	root.AddCommand(newPairCommand(env))
 	root.AddCommand(newMCPCommand(env))
+	root.AddCommand(newChannelPluginCommand(env))
+	root.AddCommand(newCodexBridgeCommand(env))
 	root.AddCommand(newUserInstallModeCommand())
 	root.AddCommand(newAuthCommand(env))
 

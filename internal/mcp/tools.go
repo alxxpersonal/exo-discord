@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -777,10 +778,7 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 		defer unsubscribe()
 
 		collected := make([]discordpkg.InteractionEvent, 0, limit)
-		for {
-			if len(collected) >= limit {
-				break
-			}
+		for len(collected) < limit {
 			select {
 			case <-listenCtx.Done():
 				return nil, interactionListenResult{Events: collected}, nil
@@ -881,7 +879,7 @@ func requireConfirm(confirm bool) error {
 	if confirm {
 		return nil
 	}
-	return fmt.Errorf(destructiveConfirmError)
+	return errors.New(destructiveConfirmError)
 }
 
 func logExecAudit(request *sdkmcp.CallToolRequest, source string) {

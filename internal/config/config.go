@@ -174,6 +174,7 @@ type Config struct {
 	Pairing           PairingConfig  `toml:"pairing"`
 	Hook              HookConfig     `toml:"hook"`
 	MCP               MCPConfig      `toml:"mcp"`
+	Channel           ChannelConfig  `toml:"channel"`
 	Downloads         DownloadConfig `toml:"downloads"`
 	Logging           LoggingConfig  `toml:"logging"`
 	Status            StatusConfig   `toml:"status"`
@@ -222,6 +223,27 @@ type HookStdioConfig struct {
 type MCPConfig struct {
 	Transport  MCPTransport `toml:"transport"`
 	ListenAddr string       `toml:"listen_addr"`
+}
+
+// ChannelConfig stores channel bridge settings.
+type ChannelConfig struct {
+	Enabled []string            `toml:"enabled"`
+	Claude  ChannelClaudeConfig `toml:"claude"`
+	Codex   ChannelCodexConfig  `toml:"codex"`
+}
+
+// ChannelClaudeConfig stores Claude bridge settings.
+type ChannelClaudeConfig struct {
+	PermissionRelay bool `toml:"permission_relay"`
+}
+
+// ChannelCodexConfig stores Codex bridge settings.
+type ChannelCodexConfig struct {
+	Transport       string `toml:"transport"`
+	SocketPath      string `toml:"socket_path"`
+	WebsocketURL    string `toml:"websocket_url"`
+	ThreadID        string `toml:"thread_id"`
+	MirrorResponses bool   `toml:"mirror_responses"`
 }
 
 // DownloadConfig stores attachment download settings.
@@ -280,6 +302,16 @@ func defaultConfig(homeDir string) Config {
 		MCP: MCPConfig{
 			Transport: MCPTransportStdio,
 		},
+		Channel: ChannelConfig{
+			Claude: ChannelClaudeConfig{
+				PermissionRelay: false,
+			},
+			Codex: ChannelCodexConfig{
+				Transport:       "unix",
+				SocketPath:      filepath.Join(homeDir, ".codex", "sessions", "default", "broker.sock"),
+				MirrorResponses: true,
+			},
+		},
 		Downloads: DownloadConfig{
 			Dir:                filepath.Join(stateDir, inboxDirName),
 			MaxAttachmentBytes: 25 * 1024 * 1024,
@@ -303,7 +335,12 @@ func (c *Config) normalize(homeDir string) {
 	c.AllowedUserIDs = dedupe(c.AllowedUserIDs)
 	c.AllowedChannelIDs = dedupe(c.AllowedChannelIDs)
 	c.AllowedRoleIDs = dedupe(c.AllowedRoleIDs)
+	c.Channel.Enabled = dedupe(c.Channel.Enabled)
 
+	c.Channel.Codex.Transport = strings.TrimSpace(c.Channel.Codex.Transport)
+	c.Channel.Codex.SocketPath = expandHome(strings.TrimSpace(c.Channel.Codex.SocketPath), homeDir)
+	c.Channel.Codex.WebsocketURL = strings.TrimSpace(c.Channel.Codex.WebsocketURL)
+	c.Channel.Codex.ThreadID = strings.TrimSpace(c.Channel.Codex.ThreadID)
 	c.Downloads.Dir = expandHome(c.Downloads.Dir, homeDir)
 }
 
@@ -375,6 +412,20 @@ func (c Config) Validate() error {
 		return fmt.Errorf("unsupported log format %q", c.Logging.Format)
 	}
 
+	for _, target := range c.Channel.Enabled {
+		switch target {
+		case "claude", "codex":
+		default:
+			return fmt.Errorf("unsupported channel target %q", target)
+		}
+	}
+
+	switch c.Channel.Codex.Transport {
+	case "", "unix", "ws":
+	default:
+		return fmt.Errorf("unsupported channel codex transport %q", c.Channel.Codex.Transport)
+	}
+
 	switch c.Status.Presence {
 	case PresenceOnline, PresenceIdle, PresenceDND, PresenceInvisible:
 	default:
@@ -410,6 +461,12 @@ func (c Config) Validate() error {
 	}
 	if c.Hook.Kind == HookKindStdio && len(c.Hook.Stdio.Command) == 0 {
 		return fmt.Errorf("hook stdio command must not be empty")
+	}
+	if c.Channel.Codex.Transport == "unix" && c.Channel.Codex.SocketPath == "" {
+		return fmt.Errorf("channel codex socket_path must not be empty for unix transport")
+	}
+	if c.Channel.Codex.Transport == "ws" && c.Channel.Codex.WebsocketURL == "" {
+		return fmt.Errorf("channel codex websocket_url must not be empty for ws transport")
 	}
 
 	if c.Mode == ModeUserInstall {
