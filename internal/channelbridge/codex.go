@@ -34,11 +34,12 @@ const (
 
 // CodexAdapter delivers inbound Discord events to a running Codex app-server.
 type CodexAdapter struct {
-	transport       string
-	socketPath      string
-	websocketURL    string
-	threadID        string
-	mirrorResponses bool
+	transport        string
+	socketPath       string
+	websocketURL     string
+	threadID         string
+	mirrorResponses  bool
+	autoCreateThread bool
 
 	session     discordpkg.Session
 	audit       *AuditWriter
@@ -147,6 +148,24 @@ type codexTurnStartParams struct {
 	Input    []codexUserInput `json:"input"`
 }
 
+type codexThreadStartParams struct{}
+
+type codexThreadStartResponse struct {
+	Thread codexThreadRef `json:"thread"`
+}
+
+type codexThreadResumeParams struct {
+	ThreadID string `json:"threadId"`
+}
+
+type codexThreadResumeResponse struct {
+	Thread codexThreadRef `json:"thread"`
+}
+
+type codexThreadRef struct {
+	ID string `json:"id"`
+}
+
 type codexUserInput struct {
 	Type         string `json:"type,omitempty"`
 	Text         string `json:"text,omitempty"`
@@ -193,6 +212,7 @@ func NewCodexAdapter(cfg CodexConfig, hookEnv HookEnv) (*CodexAdapter, error) {
 		websocketURL:     cfg.WebsocketURL,
 		threadID:         cfg.ThreadID,
 		mirrorResponses:  cfg.MirrorResponses,
+		autoCreateThread: cfg.AutoCreateThread,
 		session:          hookEnv.Session,
 		audit:            NewAuditWriter(hookEnv.HomeDir),
 		dialContext:      (&net.Dialer{}).DialContext,
@@ -239,46 +259,60 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 	if err != nil {
 		return err
 	}
+	originalThreadID := threadID
+	fallbackPath := "none"
 
 	formatted := formatCodexInput(event)
-	started, err := a.startTurn(ctx, threadID, formatted)
-	if err != nil && isThreadNotFoundError(err) {
-		discoveredThreadID, discoverErr := a.threadStore.DiscoverActiveThread(ctx)
-		if discoverErr != nil {
-			return fmt.Errorf("rediscover codex thread after thread not found: %w", discoverErr)
+	started, startErr := a.startTurn(ctx, threadID, formatted)
+	if startErr != nil && isThreadNotFoundError(startErr) {
+		recoveredThreadID, recoveredPath, recoverErr := a.recoverThread(ctx, threadID, explicit)
+		if recoverErr != nil {
+			a.auditDelivery(event, originalThreadID, "", "error", recoveredPath, recoverErr.Error())
+			return recoverErr
 		}
+		fallbackPath = recoveredPath
+		slog.Warn("codex thread not found, recovered via fallback",
+			"original_thread_id", originalThreadID,
+			"recovered_thread_id", recoveredThreadID,
+			"fallback_path", fallbackPath,
+		)
 		if explicit {
-			slog.Warn("config thread_id stale, rediscovering", "thread_id", threadID, "discovered_thread_id", discoveredThreadID)
 			a.mu.Lock()
-			a.threadID = discoveredThreadID
+			a.threadID = recoveredThreadID
 			a.mu.Unlock()
 		}
-		threadID = discoveredThreadID
+		threadID = recoveredThreadID
 		if saveErr := a.threadStore.SaveThread(threadID); saveErr != nil {
-			return fmt.Errorf("save rediscovered codex thread: %w", saveErr)
+			a.auditDelivery(event, originalThreadID, threadID, "error", fallbackPath, saveErr.Error())
+			return fmt.Errorf("save recovered codex thread: %w", saveErr)
 		}
-		started, err = a.startTurn(ctx, threadID, formatted)
+		started, startErr = a.startTurn(ctx, threadID, formatted)
 	}
-	if err != nil {
-		return err
+	if startErr != nil {
+		a.auditDelivery(event, originalThreadID, threadID, "error", fallbackPath, startErr.Error())
+		return startErr
 	}
 
 	if err := a.threadStore.SaveThread(threadID); err != nil {
+		a.auditDelivery(event, originalThreadID, threadID, "error", fallbackPath, err.Error())
 		return fmt.Errorf("save codex thread: %w", err)
 	}
 
 	if a.audit != nil {
 		meta := map[string]any{
-			"chat_id":    event.Message.ChannelID,
-			"message_id": event.Message.ID,
-			"user":       event.Message.AuthorUsername,
-			"user_id":    event.Message.AuthorID,
-			"thread_id":  threadID,
+			"chat_id":            event.Message.ChannelID,
+			"message_id":         event.Message.ID,
+			"user":               event.Message.AuthorUsername,
+			"user_id":            event.Message.AuthorID,
+			"thread_id":          threadID,
+			"original_thread_id": originalThreadID,
+			"fallback_path":      fallbackPath,
 		}
 		if err := a.audit.Append(a.Name(), event.Source, formatted, meta); err != nil {
 			return fmt.Errorf("append codex channel audit: %w", err)
 		}
 	}
+	a.auditDelivery(event, originalThreadID, threadID, "success", fallbackPath, "")
 
 	if a.mirrorResponses && a.session != nil && started.Turn.ID != "" {
 		a.mu.Lock()
@@ -732,6 +766,99 @@ func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, error
 		return "", false, err
 	}
 	return id, false, nil
+}
+
+// recoverThread attempts to recover from a thread-not-found error by
+// resuming the requested thread from on-disk rollouts, falling back to
+// discovery, then to auto-creation via thread/start. Returns the new
+// thread id and a label identifying which recovery path succeeded.
+func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID string, explicit bool) (string, string, error) {
+	// try thread/resume first when the caller supplied an explicit id: the
+	// app-server shares $CODEX_HOME/rollouts with the interactive codex shell,
+	// so an id that is unknown in memory may still be loadable from disk.
+	if explicit && requestedThreadID != "" {
+		resumedID, resumeErr := a.resumeThread(ctx, requestedThreadID)
+		if resumeErr == nil && resumedID != "" {
+			return resumedID, "resume", nil
+		}
+		if resumeErr != nil {
+			slog.Warn("codex thread resume failed, trying discovery",
+				"thread_id", requestedThreadID,
+				"error", resumeErr,
+			)
+		}
+	}
+
+	// fall back to discovery against the connected app-server
+	discoveredThreadID, discoverErr := a.threadStore.DiscoverActiveThread(ctx)
+	if discoverErr == nil && discoveredThreadID != "" {
+		return discoveredThreadID, "discover", nil
+	}
+
+	if !a.autoCreateThread {
+		return "", "error", fmt.Errorf(
+			"codex app-server has no thread matching %q and auto-create is disabled (pass --auto-create-thread, "+
+				"start a conversation in the app-server first, or omit --thread to use discovery): %w",
+			requestedThreadID, discoverErr,
+		)
+	}
+
+	createdID, createErr := a.createThread(ctx)
+	if createErr != nil {
+		return "", "error", fmt.Errorf(
+			"rediscover codex thread after thread not found: %w (auto-create also failed: %s)",
+			discoverErr, createErr.Error(),
+		)
+	}
+	return createdID, "auto_create", nil
+}
+
+// resumeThread loads a thread by id from the app-server's rollout store.
+func (a *CodexAdapter) resumeThread(ctx context.Context, threadID string) (string, error) {
+	var response codexThreadResumeResponse
+	if err := a.request(ctx, "thread/resume", codexThreadResumeParams{ThreadID: threadID}, &response); err != nil {
+		return "", fmt.Errorf("resume codex thread %s: %w", threadID, err)
+	}
+	if response.Thread.ID == "" {
+		return "", fmt.Errorf("resume codex thread %s: empty thread id in response", threadID)
+	}
+	return response.Thread.ID, nil
+}
+
+// createThread opens a brand new codex thread on the connected app-server.
+func (a *CodexAdapter) createThread(ctx context.Context) (string, error) {
+	var response codexThreadStartResponse
+	if err := a.request(ctx, "thread/start", codexThreadStartParams{}, &response); err != nil {
+		return "", fmt.Errorf("start codex thread: %w", err)
+	}
+	if response.Thread.ID == "" {
+		return "", fmt.Errorf("start codex thread: empty thread id in response")
+	}
+	return response.Thread.ID, nil
+}
+
+// auditDelivery records the outcome of a codex delivery attempt via slog.
+// The structured record captures the original requested thread id, the
+// thread id the turn was actually started on, which fallback path ran,
+// and whether the turn succeeded.
+func (a *CodexAdapter) auditDelivery(event Event, originalThreadID string, finalThreadID string, result string, fallbackPath string, errMessage string) {
+	attrs := []any{
+		"adapter", a.Name(),
+		"source", event.Source,
+		"message_id", event.Message.ID,
+		"channel_id", event.Message.ChannelID,
+		"user_id", event.Message.AuthorID,
+		"original_thread_id", originalThreadID,
+		"final_thread_id", finalThreadID,
+		"fallback_path", fallbackPath,
+		"result", result,
+	}
+	if errMessage != "" {
+		attrs = append(attrs, "error", errMessage)
+		slog.Warn("codex delivery outcome", attrs...)
+		return
+	}
+	slog.Info("codex delivery outcome", attrs...)
 }
 
 func (a *CodexAdapter) startTurn(ctx context.Context, threadID string, formatted string) (codexTurnStartResponse, error) {

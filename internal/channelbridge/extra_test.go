@@ -1118,7 +1118,7 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 		}()
 
 		reader := bufio.NewReader(conn)
-		for step := 0; step < 5; step++ {
+		for step := 0; step < 6; step++ {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				return
@@ -1155,8 +1155,15 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 				}
 				writeUnixError(conn, request["id"], "thread not found")
 			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				// resume fails because the stale id is not on disk either
+				writeUnixError(conn, request["id"], "thread not found")
+			case 4:
 				if method != "thread/list" {
-					t.Errorf("step 3 method = %q, want thread/list", method)
+					t.Errorf("step 4 method = %q, want thread/list", method)
 					return
 				}
 				writeUnixResponse(conn, request["id"], map[string]any{
@@ -1170,9 +1177,9 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 						},
 					},
 				})
-			case 4:
+			case 5:
 				if method != "turn/start" {
-					t.Errorf("step 4 method = %q, want turn/start", method)
+					t.Errorf("step 5 method = %q, want turn/start", method)
 					return
 				}
 				params := request["params"].(map[string]any)
@@ -1251,7 +1258,7 @@ func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testi
 		}()
 
 		reader := bufio.NewReader(conn)
-		for step := 0; step < 3; step++ {
+		for step := 0; step < 4; step++ {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				return
@@ -1281,6 +1288,13 @@ func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testi
 					t.Errorf("step 2 method = %q, want turn/start", method)
 					return
 				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				// resume fails: thread id is stale on disk too
 				writeUnixError(conn, request["id"], "thread not found")
 			}
 		}
@@ -1314,8 +1328,8 @@ func TestCodexAdapterDeliverReturnsDiscoveryErrorForStaleExplicitThread(t *testi
 	if err == nil {
 		t.Fatal("Deliver() error = nil, want rediscovery failure")
 	}
-	if !strings.Contains(err.Error(), "rediscover codex thread after thread not found") {
-		t.Fatalf("Deliver() error = %v, want rediscovery context", err)
+	if !strings.Contains(err.Error(), "auto-create is disabled") {
+		t.Fatalf("Deliver() error = %v, want auto-create-disabled context", err)
 	}
 	if !strings.Contains(err.Error(), "no active codex threads found") {
 		t.Fatalf("Deliver() error = %v, want discovery failure", err)
