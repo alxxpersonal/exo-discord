@@ -327,7 +327,7 @@ func (a *CodexAdapter) ListThreads(ctx context.Context) ([]codexThreadSummary, e
 
 // --- Connection Management ---
 
-func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
+func (a *CodexAdapter) ensureConnected(ctx context.Context) (err error) {
 	a.mu.Lock()
 	if a.conn != nil {
 		a.mu.Unlock()
@@ -351,7 +351,19 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
 
 	go a.readLoop(context.WithoutCancel(ctx))
 
-	if err := a.request(ctx, "initialize", codexInitializeParams{
+	defer func() {
+		if err == nil {
+			return
+		}
+		a.mu.Lock()
+		if a.conn == conn {
+			a.conn = nil
+		}
+		a.mu.Unlock()
+		_ = conn.Close()
+	}()
+
+	if err = a.request(ctx, "initialize", codexInitializeParams{
 		ClientInfo: codexClientInfo{
 			Name:    "exo-discord",
 			Title:   "exo-discord",
@@ -361,7 +373,7 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
 	}, nil); err != nil {
 		return fmt.Errorf("initialize codex app-server: %w", err)
 	}
-	if err := a.notify(ctx, "initialized", codexInitializedParams{}); err != nil {
+	if err = a.notify(ctx, "initialized", codexInitializedParams{}); err != nil {
 		return fmt.Errorf("notify codex app-server initialized: %w", err)
 	}
 	return nil

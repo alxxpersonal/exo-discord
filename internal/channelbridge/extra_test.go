@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -433,6 +434,149 @@ func TestCodexAdapterRequestWriteError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "write failed") {
 		t.Fatalf("request() error = %v, want write failure", err)
 	}
+}
+
+func TestCodexAdapterEnsureConnectedReconnectsAfterInitializeFailure(t *testing.T) {
+	t.Parallel()
+
+	socketPath := "/tmp/exo-discord-initialize-reset-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".sock"
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	var acceptCount int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+
+			attempt := atomic.AddInt32(&acceptCount, 1)
+			go func(attempt int32, conn net.Conn) {
+				defer func() {
+					_ = conn.Close()
+				}()
+
+				reader := bufio.NewReader(conn)
+				switch attempt {
+				case 1:
+					line, readErr := reader.ReadBytes('\n')
+					if readErr != nil {
+						return
+					}
+
+					var request map[string]any
+					if err := json.Unmarshal(line, &request); err != nil {
+						t.Errorf("Unmarshal() error = %v", err)
+						return
+					}
+					if method := request["method"]; method != "initialize" {
+						t.Errorf("attempt 1 method = %#v, want initialize", method)
+						return
+					}
+					writeUnixError(conn, request["id"], "initialize rejected")
+				case 2:
+					for step := 0; step < 3; step++ {
+						line, readErr := reader.ReadBytes('\n')
+						if readErr != nil {
+							return
+						}
+
+						var request map[string]any
+						if err := json.Unmarshal(line, &request); err != nil {
+							t.Errorf("Unmarshal() error = %v", err)
+							return
+						}
+
+						method := request["method"].(string)
+						switch step {
+						case 0:
+							if method != "initialize" {
+								t.Errorf("step 0 method = %q, want initialize", method)
+								return
+							}
+							writeUnixResponse(conn, request["id"], map[string]any{})
+						case 1:
+							if method != "initialized" {
+								t.Errorf("step 1 method = %q, want initialized", method)
+								return
+							}
+						case 2:
+							if method != "turn/start" {
+								t.Errorf("step 2 method = %q, want turn/start", method)
+								return
+							}
+							writeUnixResponse(conn, request["id"], map[string]any{
+								"turn": map[string]any{
+									"id": "turn-1",
+								},
+							})
+						}
+					}
+				}
+			}(attempt, conn)
+		}
+	}()
+
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:  codexTransportUnix,
+		SocketPath: socketPath,
+		ThreadID:   "thread-1",
+	}, HookEnv{
+		HomeDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "initialize codex app-server") {
+		t.Fatalf("first Deliver() error = %v, want initialize failure", err)
+	}
+	if adapter.conn != nil {
+		t.Fatal("adapter conn retained after initialize failure")
+	}
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-2",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello again",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("second Deliver() error = %v", err)
+	}
+
+	if got := atomic.LoadInt32(&acceptCount); got != 2 {
+		t.Fatalf("connect attempts = %d, want 2", got)
+	}
+
+	_ = listener.Close()
+	<-done
 }
 
 func TestCodexAdapterCloseClosesConnection(t *testing.T) {
