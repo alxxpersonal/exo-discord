@@ -2,7 +2,10 @@ package runtimeexec
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
 )
@@ -161,6 +164,57 @@ func Run(client *ManagerClient) error {
 	}
 	if manager.channelDelete != "chan-1" {
 		t.Fatalf("channelDelete = %q", manager.channelDelete)
+	}
+}
+
+func TestExecuteSourceRejectsDisallowedImport(t *testing.T) {
+	source := `package main
+
+import "os"
+
+func Run(client *ManagerClient) error {
+	return nil
+}
+`
+
+	err := ExecuteSource(context.Background(), &fakeManager{}, source)
+	if err == nil || !strings.Contains(err.Error(), `script import "os" is not allowed`) {
+		t.Fatalf("ExecuteSource() error = %v", err)
+	}
+}
+
+func TestExecuteSourceRecoversPanic(t *testing.T) {
+	source := `package main
+
+func Run(client *ManagerClient) error {
+	panic("boom")
+}
+`
+
+	err := ExecuteSource(context.Background(), &fakeManager{}, source)
+	if err == nil || !strings.Contains(err.Error(), "script panicked: boom") {
+		t.Fatalf("ExecuteSource() error = %v", err)
+	}
+}
+
+func TestExecuteSourceTimesOut(t *testing.T) {
+	t.Setenv(execTimeoutEnv, "25ms")
+
+	source := `package main
+
+func Run(client *ManagerClient) error {
+	for {
+	}
+}
+`
+
+	start := time.Now()
+	err := ExecuteSource(context.Background(), &fakeManager{}, source)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ExecuteSource() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("ExecuteSource() took %v, want under 500ms", elapsed)
 	}
 }
 

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
 	"github.com/traefik/yaegi/interp"
@@ -289,10 +292,18 @@ func ExecuteSource(ctx context.Context, manager discord.Manager, source string) 
 	if err != nil {
 		return err
 	}
+	if err := validateImports(source); err != nil {
+		return err
+	}
+
+	timeout, err := loadExecTimeout()
+	if err != nil {
+		return err
+	}
 
 	interpreter := interp.New(interp.Options{})
-	if err := interpreter.Use(stdlib.Symbols); err != nil {
-		return fmt.Errorf("load yaegi stdlib: %w", err)
+	if err := interpreter.Use(allowedSymbols()); err != nil {
+		return fmt.Errorf("load yaegi sandbox symbols: %w", err)
 	}
 	if err := interpreter.Use(exports()); err != nil {
 		return fmt.Errorf("load manager exports: %w", err)
@@ -314,21 +325,59 @@ func ExecuteSource(ctx context.Context, manager discord.Manager, source string) 
 		return err
 	}
 
-	client := NewManagerClient(ctx, manager)
-	results := runValue.Call([]reflect.Value{reflect.ValueOf(client)})
-	if len(results) != 1 {
-		return fmt.Errorf("Run must return exactly one value")
-	}
-	if errValue := results[0].Interface(); errValue != nil {
-		return errValue.(error)
-	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	return nil
+	client := NewManagerClient(runCtx, manager)
+	resultCh := make(chan error, 1)
+	go func() {
+		callErr := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("script panicked: %v", r)
+				}
+			}()
+
+			results := runValue.Call([]reflect.Value{reflect.ValueOf(client)})
+			if len(results) != 1 {
+				return fmt.Errorf("Run must return exactly one value")
+			}
+			if errValue := results[0].Interface(); errValue != nil {
+				return errValue.(error)
+			}
+
+			return nil
+		}()
+
+		select {
+		case resultCh <- callErr:
+		case <-runCtx.Done():
+		}
+	}()
+
+	select {
+	case err := <-resultCh:
+		return err
+	case <-runCtx.Done():
+		return fmt.Errorf("run script: %w", runCtx.Err())
+	}
 }
 
 // --- Internal Helpers ---
 
 const packageImportPath = "github.com/alxxpersonal/exo-discord/internal/manage/runtimeexec"
+const defaultExecTimeout = 30 * time.Second
+const execTimeoutEnv = "EXO_DISCORD_EXEC_TIMEOUT"
+
+var allowedImports = map[string]struct{}{
+	"encoding/json": {},
+	"errors":        {},
+	"fmt":           {},
+	"slices":        {},
+	"sort":          {},
+	"strings":       {},
+	"time":          {},
+}
 
 func exports() interp.Exports {
 	return interp.Exports{
@@ -336,6 +385,22 @@ func exports() interp.Exports {
 			"ManagerClient": reflect.ValueOf((*ManagerClient)(nil)),
 		},
 	}
+}
+
+func allowedSymbols() interp.Exports {
+	symbols := interp.Exports{
+		"encoding/json/json": stdlib.Symbols["encoding/json/json"],
+		"errors/errors":      stdlib.Symbols["errors/errors"],
+		"fmt/fmt":            stdlib.Symbols["fmt/fmt"],
+		"slices/slices":      stdlib.Symbols["slices/slices"],
+		"sort/sort":          stdlib.Symbols["sort/sort"],
+		"strings/strings":    stdlib.Symbols["strings/strings"],
+		"time/time": {
+			"Duration": stdlib.Symbols["time/time"]["Duration"],
+			"Now":      stdlib.Symbols["time/time"]["Now"],
+		},
+	}
+	return symbols
 }
 
 func detectPackageName(source string) (string, error) {
@@ -347,6 +412,42 @@ func detectPackageName(source string) (string, error) {
 		return "", fmt.Errorf("script package name not found")
 	}
 	return strings.TrimSpace(file.Name.Name), nil
+}
+
+func validateImports(source string) error {
+	file, err := parser.ParseFile(token.NewFileSet(), "script.go", source, parser.ImportsOnly)
+	if err != nil {
+		return fmt.Errorf("parse script imports: %w", err)
+	}
+
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			return fmt.Errorf("decode script import %q: %w", spec.Path.Value, err)
+		}
+		if _, ok := allowedImports[importPath]; ok {
+			continue
+		}
+		return fmt.Errorf("script import %q is not allowed", importPath)
+	}
+
+	return nil
+}
+
+func loadExecTimeout() (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(execTimeoutEnv))
+	if value == "" {
+		return defaultExecTimeout, nil
+	}
+
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", execTimeoutEnv, err)
+	}
+	if timeout <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", execTimeoutEnv)
+	}
+	return timeout, nil
 }
 
 func validateRunSignature(runValue reflect.Value) error {
