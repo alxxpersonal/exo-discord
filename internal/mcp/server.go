@@ -17,13 +17,13 @@ type Server struct {
 // --- Constructors ---
 
 // NewServer creates an MCP server for a Discord session.
-func NewServer(session discordpkg.Session) *Server {
+func NewServer(session discordpkg.Session, manager discordpkg.Manager) *Server {
 	server := sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "exo-discord",
 		Version: "0.1.0",
 	}, nil)
 
-	registerTools(server, session)
+	registerTools(server, session, manager)
 
 	return &Server{server: server}
 }

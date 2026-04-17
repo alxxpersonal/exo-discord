@@ -28,7 +28,8 @@ type Environment struct {
 	Context        func() context.Context
 	DiscoverConfig func(string, string) (config.ResolvedConfig, error)
 	NewSession     func(config.ResolvedConfig) (discordpkg.Session, error)
-	NewMCPServer   func(discordpkg.Session) mcpServer
+	NewManager     func(config.ResolvedConfig) (discordpkg.Manager, error)
+	NewMCPServer   func(discordpkg.Session, discordpkg.Manager) mcpServer
 	ListenRunner   listenRunner
 	BotModeRunner  botModeRunner
 	OAuthOverride  oauthEndpointOverride
@@ -123,9 +124,12 @@ func (env Environment) withDefaults() Environment {
 			return defaultSessionFactory(env, resolved)
 		}
 	}
+	if env.NewManager == nil {
+		env.NewManager = defaultManagerFactory
+	}
 	if env.NewMCPServer == nil {
-		env.NewMCPServer = func(session discordpkg.Session) mcpServer {
-			return mcppkg.NewServer(session)
+		env.NewMCPServer = func(session discordpkg.Session, manager discordpkg.Manager) mcpServer {
+			return mcppkg.NewServer(session, manager)
 		}
 	}
 	if env.ListenRunner == nil {
@@ -164,6 +168,7 @@ func NewRootCommand(env Environment) *cobra.Command {
 	root.AddCommand(newConfigureCommand(env))
 	root.AddCommand(newDoctorCommand(env))
 	root.AddCommand(newSendCommand(env))
+	root.AddCommand(newManageCommand(env))
 	root.AddCommand(newListenCommand(env))
 	root.AddCommand(newBotModeCommand(env))
 	root.AddCommand(newAccessCommand(env))
@@ -213,6 +218,19 @@ func defaultSessionFactory(env Environment, resolved config.ResolvedConfig) (dis
 	}
 
 	return botpkg.NewSession(client), nil
+}
+
+func defaultManagerFactory(resolved config.ResolvedConfig) (discordpkg.Manager, error) {
+	if resolved.Config.Mode == config.ModeUserInstall {
+		return nil, errors.New("user_install mode is not implemented")
+	}
+
+	token := strings.TrimSpace(resolved.Config.BotToken)
+	if token == "" {
+		return nil, errors.New("bot token is required")
+	}
+
+	return botpkg.NewDiscordGoManager(token, defaultGatewayIntents)
 }
 
 // --- Gateway Intents ---

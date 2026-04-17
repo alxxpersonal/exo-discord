@@ -1,0 +1,33 @@
+{
+  "guild_id": "guild-1",
+  "changes": [
+    {
+      "action": "update",
+      "kind": "role",
+      "name": "admin",
+      "fields": [
+        "color",
+        "hoist"
+      ]
+    },
+    {
+      "action": "delete",
+      "kind": "role",
+      "name": "moderator"
+    },
+    {
+      "action": "update",
+      "kind": "channel",
+      "name": "general",
+      "fields": [
+        "topic",
+        "overwrites"
+      ]
+    },
+    {
+      "action": "delete",
+      "kind": "channel",
+      "name": "obsolete"
+    }
+  ]
+}

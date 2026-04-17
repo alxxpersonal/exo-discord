@@ -41,6 +41,10 @@ func newMCPServeCommand(env Environment) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			manager, err := env.NewManager(resolved)
+			if err != nil {
+				return err
+			}
 
 			ctx := env.commandContext()
 			if err := session.Open(ctx); err != nil {
@@ -49,9 +53,15 @@ func newMCPServeCommand(env Environment) *cobra.Command {
 			defer func() {
 				_ = session.Close(ctx)
 			}()
+			if err := manager.Open(ctx); err != nil {
+				return err
+			}
+			defer func() {
+				_ = manager.Close(ctx)
+			}()
 
 			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "serving mcp over stdio")
-			return env.NewMCPServer(session).Run(ctx)
+			return env.NewMCPServer(session, manager).Run(ctx)
 		},
 	}
 }

@@ -1,0 +1,15 @@
+guild:
+  id: guild-1
+roles:
+  - name: admin
+    color: "#112233"
+    hoist: true
+channels:
+  - name: general
+    type: text
+    topic: hello
+    overwrites:
+      - role: admin
+        allow:
+          - view_channel
+          - send_messages
