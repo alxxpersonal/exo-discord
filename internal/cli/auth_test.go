@@ -156,6 +156,9 @@ func TestAuthRevokeRequiresConfirmationAndDeletes(t *testing.T) {
 		HomeDir:  homeDir,
 		Stdout:   stdout,
 		Stderr:   &bytes.Buffer{},
+		OAuthOverride: oauthEndpointOverride{
+			RevokeBase: revokeServer.URL,
+		},
 	}
 
 	cmd := NewRootCommand(env)
@@ -314,6 +317,119 @@ func TestAuthLoginRejectsCallbackWithoutState(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "callback did not include state") {
 		t.Fatalf("Execute() error = %v, want callback-did-not-include-state", err)
+	}
+}
+
+// --- C3: Surface revoke failures + --force flag ---
+
+func TestAuthRevokeSurfacesRemoteFailure(t *testing.T) {
+	t.Parallel()
+
+	revokeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server_error"}`))
+	}))
+	defer revokeServer.Close()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, oauthConfigBody(revokeServer.URL))
+
+	storage, err := userinstall.NewStorage(filepath.Join(homeDir, ".exo-discord", "oauth"))
+	if err != nil {
+		t.Fatalf("NewStorage() error = %v", err)
+	}
+	if err := storage.Save(userinstall.StoredToken{
+		UserID:       "221",
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	stderr := &bytes.Buffer{}
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   stderr,
+		Context:  context.Background,
+		OAuthOverride: oauthEndpointOverride{
+			RevokeBase: revokeServer.URL,
+		},
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"auth", "revoke", "--yes", "221"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want remote revoke failure")
+	}
+	if !strings.Contains(err.Error(), "re-run with --force") {
+		t.Fatalf("Execute() error = %v, want --force hint", err)
+	}
+	if !strings.Contains(stderr.String(), "revoke access_token") {
+		t.Fatalf("stderr = %q, want access_token error surfaced", stderr.String())
+	}
+
+	// token still on disk because revoke failed without --force
+	if _, err := storage.Load("221"); err != nil {
+		t.Fatalf("token deleted despite failure: %v", err)
+	}
+}
+
+func TestAuthRevokeForceDeletesLocalOnFailure(t *testing.T) {
+	t.Parallel()
+
+	revokeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer revokeServer.Close()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, oauthConfigBody(revokeServer.URL))
+
+	storage, err := userinstall.NewStorage(filepath.Join(homeDir, ".exo-discord", "oauth"))
+	if err != nil {
+		t.Fatalf("NewStorage() error = %v", err)
+	}
+	if err := storage.Save(userinstall.StoredToken{
+		UserID:       "221",
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdout:   stdout,
+		Stderr:   &bytes.Buffer{},
+		Context:  context.Background,
+		OAuthOverride: oauthEndpointOverride{
+			RevokeBase: revokeServer.URL,
+		},
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"auth", "revoke", "--yes", "--force", "221"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var result authRevokeResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !result.OK || result.UserID != "221" {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("Warnings = empty, want remote revoke warnings")
+	}
+	if _, err := storage.Load("221"); err == nil {
+		t.Fatal("Load() error = nil, want token deleted locally")
 	}
 }
 

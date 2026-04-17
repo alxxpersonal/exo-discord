@@ -56,8 +56,9 @@ type authListResult struct {
 }
 
 type authRevokeResult struct {
-	OK     bool   `json:"ok"`
-	UserID string `json:"user_id"`
+	OK       bool     `json:"ok"`
+	UserID   string   `json:"user_id"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // --- Auth Command ---
@@ -229,6 +230,7 @@ func newAuthListCommand(env Environment) *cobra.Command {
 
 func newAuthRevokeCommand(env Environment) *cobra.Command {
 	var assumeYes bool
+	var force bool
 
 	cmd := &cobra.Command{
 		Use:   "revoke <user-id>",
@@ -272,11 +274,25 @@ func newAuthRevokeCommand(env Environment) *cobra.Command {
 
 			client := userinstall.NewOAuthClient(oauthCfg, &http.Client{Timeout: 30 * time.Second})
 			ctx := env.commandContext()
+			stderr := cmd.ErrOrStderr()
+			var warnings []string
 			if stored.AccessToken != "" {
-				_ = client.RevokeToken(ctx, stored.AccessToken, "access_token")
+				if err := client.RevokeToken(ctx, stored.AccessToken, "access_token"); err != nil {
+					msg := fmt.Sprintf("revoke access_token: %v", err)
+					warnings = append(warnings, msg)
+					_, _ = fmt.Fprintln(stderr, msg)
+				}
 			}
 			if stored.RefreshToken != "" {
-				_ = client.RevokeToken(ctx, stored.RefreshToken, "refresh_token")
+				if err := client.RevokeToken(ctx, stored.RefreshToken, "refresh_token"); err != nil {
+					msg := fmt.Sprintf("revoke refresh_token: %v", err)
+					warnings = append(warnings, msg)
+					_, _ = fmt.Fprintln(stderr, msg)
+				}
+			}
+
+			if len(warnings) > 0 && !force {
+				return fmt.Errorf("remote revoke failed, re-run with --force to delete the local token anyway: %s", strings.Join(warnings, "; "))
 			}
 
 			if err := storage.Delete(userID); err != nil {
@@ -284,13 +300,15 @@ func newAuthRevokeCommand(env Environment) *cobra.Command {
 			}
 
 			return writeJSON(cmd.OutOrStdout(), authRevokeResult{
-				OK:     true,
-				UserID: userID,
+				OK:       true,
+				UserID:   userID,
+				Warnings: warnings,
 			})
 		},
 	}
 
 	cmd.Flags().BoolVar(&assumeYes, "yes", false, "skip the confirmation prompt")
+	cmd.Flags().BoolVar(&force, "force", false, "delete the local token even if remote revoke fails")
 	return cmd
 }
 
