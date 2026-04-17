@@ -244,12 +244,13 @@ type ChannelClaudeConfig struct {
 
 // ChannelCodexConfig stores Codex bridge settings.
 type ChannelCodexConfig struct {
-	Transport        string `toml:"transport"`
-	SocketPath       string `toml:"socket_path"`
-	WebsocketURL     string `toml:"websocket_url"`
-	ThreadID         string `toml:"thread_id"`
-	MirrorResponses  bool   `toml:"mirror_responses"`
-	AutoCreateThread bool   `toml:"auto_create_thread"`
+	Transport          string   `toml:"transport"`
+	SocketPath         string   `toml:"socket_path"`
+	WebsocketURL       string   `toml:"websocket_url"`
+	ThreadID           string   `toml:"thread_id"`
+	MirrorResponses    bool     `toml:"mirror_responses"`
+	MirrorFlushTimeout Duration `toml:"mirror_flush_timeout"`
+	AutoCreateThread   bool     `toml:"auto_create_thread"`
 }
 
 // DownloadConfig stores attachment download settings.
@@ -313,10 +314,11 @@ func defaultConfig(homeDir string) Config {
 				PermissionRelay: false,
 			},
 			Codex: ChannelCodexConfig{
-				Transport:        "unix",
-				SocketPath:       filepath.Join(homeDir, ".codex", "sessions", "default", "broker.sock"),
-				MirrorResponses:  true,
-				AutoCreateThread: true,
+				Transport:          "unix",
+				SocketPath:         filepath.Join(homeDir, ".codex", "sessions", "default", "broker.sock"),
+				MirrorResponses:    true,
+				MirrorFlushTimeout: Duration(30 * time.Second),
+				AutoCreateThread:   true,
 			},
 		},
 		Downloads: DownloadConfig{
@@ -474,6 +476,9 @@ func (c Config) Validate() error {
 	}
 	if c.Channel.Codex.Transport == "ws" && c.Channel.Codex.WebsocketURL == "" {
 		return fmt.Errorf("channel codex websocket_url must not be empty for ws transport")
+	}
+	if c.Channel.Codex.MirrorFlushTimeout.Duration() < 0 {
+		return fmt.Errorf("channel codex mirror_flush_timeout must be greater than or equal to zero")
 	}
 
 	if c.Mode == ModeUserInstall {

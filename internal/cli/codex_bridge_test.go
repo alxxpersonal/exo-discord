@@ -160,6 +160,9 @@ func TestCodexBridgeCommandUsesInjectedAdapter(t *testing.T) {
 	if gotCfg.Codex.Transport != "unix" || gotCfg.Codex.SocketPath != "/tmp/broker.sock" || gotCfg.Codex.ThreadID != "thread-1" {
 		t.Fatalf("codex config = %#v", gotCfg.Codex)
 	}
+	if gotCfg.Codex.MirrorFlushTimeout != 30*time.Second {
+		t.Fatalf("codex config mirrorFlushTimeout = %v, want 30s", gotCfg.Codex.MirrorFlushTimeout)
+	}
 	if session.OpenCount() != 1 || session.CloseCount() != 1 {
 		t.Fatalf("session open=%d close=%d, want 1/1", session.OpenCount(), session.CloseCount())
 	}
