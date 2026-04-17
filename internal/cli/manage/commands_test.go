@@ -591,7 +591,7 @@ func TestInteractionsListenCommandStreamsEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	manager.onSubscribe = func(handler discord.InteractionHandler) {
 		go func() {
-			handler(context.Background(), discord.InteractionEvent{ID: "evt-1", Type: 2})
+			handler(ctx, discord.InteractionEvent{ID: "evt-1", Type: 2})
 			cancel()
 		}()
 	}

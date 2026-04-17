@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -18,17 +19,22 @@ import (
 
 // DiscordGoManager adapts discordgo to the internal manager interface.
 type DiscordGoManager struct {
-	session     *discordgo.Session
-	mu          sync.RWMutex
-	opened      bool
-	nextID      uint64
-	subscribers map[uint64]discord.InteractionHandler
+	session          *discordgo.Session
+	mu               sync.RWMutex
+	opened           bool
+	nextID           uint64
+	subscribers      map[uint64]discord.InteractionHandler
+	interactionCtx   context.Context
+	interactionSlots chan struct{}
+	interactionWG    sync.WaitGroup
 }
 
 type permissionSpec struct {
 	Name string
 	Bits int64
 }
+
+const interactionWorkerLimit = 32
 
 // --- Constructors ---
 
@@ -46,11 +52,13 @@ func NewDiscordGoManager(token string, intents discordgo.Intent) (*DiscordGoMana
 	}
 
 	manager := &DiscordGoManager{
-		session:     session,
-		subscribers: make(map[uint64]discord.InteractionHandler),
+		session:          session,
+		subscribers:      make(map[uint64]discord.InteractionHandler),
+		interactionCtx:   context.Background(),
+		interactionSlots: make(chan struct{}, interactionWorkerLimit),
 	}
 	session.AddHandler(func(_ *discordgo.Session, interaction *discordgo.InteractionCreate) {
-		manager.handleInteractionCreate(context.Background(), interaction)
+		manager.handleInteractionCreate(interaction)
 	})
 
 	return manager, nil
@@ -59,10 +67,16 @@ func NewDiscordGoManager(token string, intents discordgo.Intent) (*DiscordGoMana
 // --- Lifecycle ---
 
 // Open opens the underlying Discord gateway session.
-func (m *DiscordGoManager) Open(context.Context) error {
+func (m *DiscordGoManager) Open(ctx context.Context) error {
+	m.ensureInteractionDispatcher()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.interactionCtx = ctx
+	if m.interactionCtx == nil {
+		m.interactionCtx = context.Background()
+	}
 	if m.opened {
 		return nil
 	}
@@ -75,16 +89,23 @@ func (m *DiscordGoManager) Open(context.Context) error {
 
 // Close closes the underlying Discord gateway session.
 func (m *DiscordGoManager) Close(context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.ensureInteractionDispatcher()
 
+	m.mu.Lock()
 	if !m.opened {
+		m.mu.Unlock()
+		m.waitForInteractionHandlers()
 		return nil
 	}
-	if err := m.session.Close(); err != nil {
+	err := m.session.Close()
+	m.opened = false
+	m.interactionCtx = context.Background()
+	m.mu.Unlock()
+
+	m.waitForInteractionHandlers()
+	if err != nil {
 		return err
 	}
-	m.opened = false
 	return nil
 }
 
@@ -687,10 +708,11 @@ func (m *DiscordGoManager) REST(ctx context.Context, req discord.RESTRequest) (d
 
 // --- Internal Helpers ---
 
-func (m *DiscordGoManager) handleInteractionCreate(ctx context.Context, interaction *discordgo.InteractionCreate) {
+func (m *DiscordGoManager) handleInteractionCreate(interaction *discordgo.InteractionCreate) {
 	if interaction == nil || interaction.Interaction == nil {
 		return
 	}
+	m.ensureInteractionDispatcher()
 
 	raw, err := json.Marshal(interaction.Interaction)
 	if err != nil {
@@ -717,15 +739,62 @@ func (m *DiscordGoManager) handleInteractionCreate(ctx context.Context, interact
 	}
 
 	m.mu.RLock()
+	ctx := m.interactionCtx
 	handlers := make([]discord.InteractionHandler, 0, len(m.subscribers))
 	for _, handler := range m.subscribers {
 		handlers = append(handlers, handler)
 	}
 	m.mu.RUnlock()
 
-	for _, handler := range handlers {
-		go handler(ctx, event)
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	for _, handler := range handlers {
+		if !m.dispatchInteractionHandler(ctx, handler, event) {
+			fmt.Fprintf(os.Stderr, "dropped interaction event %q because the listener pool is saturated\n", event.ID)
+		}
+	}
+}
+
+func (m *DiscordGoManager) ensureInteractionDispatcher() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.interactionCtx == nil {
+		m.interactionCtx = context.Background()
+	}
+	if m.interactionSlots == nil {
+		m.interactionSlots = make(chan struct{}, interactionWorkerLimit)
+	}
+}
+
+func (m *DiscordGoManager) dispatchInteractionHandler(
+	ctx context.Context,
+	handler discord.InteractionHandler,
+	event discord.InteractionEvent,
+) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+
+	select {
+	case m.interactionSlots <- struct{}{}:
+		m.interactionWG.Add(1)
+		go func() {
+			defer m.interactionWG.Done()
+			defer func() {
+				<-m.interactionSlots
+			}()
+			handler(ctx, event)
+		}()
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *DiscordGoManager) waitForInteractionHandlers() {
+	m.interactionWG.Wait()
 }
 
 func (m *DiscordGoManager) resolveRoleGuildID(ctx context.Context, guildID string, roleID string) (string, error) {

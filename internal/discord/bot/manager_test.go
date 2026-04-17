@@ -3,7 +3,9 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -256,7 +258,7 @@ func TestDiscordGoManagerHelpersAndSubscription(t *testing.T) {
 	unsubscribe := manager.SubscribeInteractions(func(_ context.Context, event discord.InteractionEvent) {
 		received <- event
 	})
-	manager.handleInteractionCreate(context.Background(), &discordgo.InteractionCreate{
+	manager.handleInteractionCreate(&discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
 			ID:        "int-1",
 			AppID:     "app-1",
@@ -336,6 +338,102 @@ func TestDiscordGoManagerHelpersAndSubscription(t *testing.T) {
 		},
 	}).Type != "text" {
 		t.Fatalf("mapChannel() type mismatch")
+	}
+}
+
+func TestDiscordGoManagerInteractionHandlersUseOpenContextAndCloseWaits(t *testing.T) {
+	listenCtx, cancel := context.WithCancel(context.Background())
+
+	manager := &DiscordGoManager{
+		subscribers:      make(map[uint64]discord.InteractionHandler),
+		interactionCtx:   listenCtx,
+		interactionSlots: make(chan struct{}, interactionWorkerLimit),
+	}
+
+	started := make(chan struct{}, 1)
+	finished := make(chan struct{}, 1)
+	manager.SubscribeInteractions(func(ctx context.Context, event discord.InteractionEvent) {
+		started <- struct{}{}
+		<-ctx.Done()
+		finished <- struct{}{}
+	})
+
+	manager.handleInteractionCreate(&discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:        "int-ctx",
+			AppID:     "app-1",
+			Type:      discordgo.InteractionPing,
+			GuildID:   "guild-1",
+			ChannelID: "chan-1",
+			Token:     "tok-1",
+		},
+	})
+
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for handler start")
+	}
+
+	cancel()
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case <-finished:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for handler finish")
+	}
+}
+
+func TestDiscordGoManagerLogsDroppedInteractionEvents(t *testing.T) {
+	manager := &DiscordGoManager{
+		subscribers:      make(map[uint64]discord.InteractionHandler),
+		interactionCtx:   context.Background(),
+		interactionSlots: make(chan struct{}, 1),
+	}
+
+	release := make(chan struct{})
+	manager.SubscribeInteractions(func(context.Context, discord.InteractionEvent) {
+		<-release
+	})
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writePipe
+	t.Cleanup(func() {
+		os.Stderr = originalStderr
+		_ = readPipe.Close()
+		_ = writePipe.Close()
+	})
+
+	manager.handleInteractionCreate(&discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID: "int-1",
+		},
+	})
+	manager.handleInteractionCreate(&discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID: "int-2",
+		},
+	})
+
+	close(release)
+	manager.waitForInteractionHandlers()
+
+	if err := writePipe.Close(); err != nil {
+		t.Fatalf("Close(writePipe) error = %v", err)
+	}
+	output, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if !strings.Contains(string(output), `dropped interaction event "int-2"`) {
+		t.Fatalf("stderr = %q", string(output))
 	}
 }
 

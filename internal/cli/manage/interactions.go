@@ -49,11 +49,11 @@ func newInteractionsListenCommand(env Environment) *cobra.Command {
 				_ = manager.Close(ctx)
 			}()
 
-			events := make(chan discord.InteractionEvent, 16)
-			unsubscribe := manager.SubscribeInteractions(func(_ context.Context, event discord.InteractionEvent) {
+			events := make(chan discord.InteractionEvent)
+			unsubscribe := manager.SubscribeInteractions(func(handlerCtx context.Context, event discord.InteractionEvent) {
 				select {
 				case events <- event:
-				default:
+				case <-handlerCtx.Done():
 				}
 			})
 			defer unsubscribe()
