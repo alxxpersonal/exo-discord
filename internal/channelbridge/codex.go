@@ -82,6 +82,8 @@ type CodexAdapter struct {
 	connectErr   error
 	pending      map[int64]chan codexResponseMessage
 	turns        map[string]codexMirrorTarget
+	turnTexts    map[string][]string
+	mirrorWG     sync.WaitGroup
 	nextID       int64
 	closeCh      chan struct{}
 	closeErr     error
@@ -228,6 +230,26 @@ type codexTurnCompletedNotification struct {
 	Turn     codexTurn `json:"turn"`
 }
 
+// codexItemCompletedNotification carries a single completed thread item (for
+// example an agent message chunk) for a turn. The codex app-server emits the
+// reply text exclusively via this notification - `turn/completed` carries an
+// empty `items` slice per v2 protocol contract.
+type codexItemCompletedNotification struct {
+	ThreadID string         `json:"threadId"`
+	TurnID   string         `json:"turnId"`
+	Item     codexThreadItem `json:"item"`
+}
+
+// codexThreadItem mirrors the v2 `ThreadItem` tagged union. Only the
+// `agentMessage` variant carries reply text the bridge needs to mirror. Other
+// variants (reasoning, commandExecution, etc.) are ignored by leaving their
+// fields zero-valued.
+type codexThreadItem struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Text string `json:"text,omitempty"`
+}
+
 type codexMirrorTarget struct {
 	ChannelID string
 	GuildID   string
@@ -259,6 +281,7 @@ func NewCodexAdapter(cfg CodexConfig, hookEnv HookEnv) (*CodexAdapter, error) {
 		reconnectBackoff: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond},
 		pending:          make(map[int64]chan codexResponseMessage),
 		turns:            make(map[string]codexMirrorTarget),
+		turnTexts:        make(map[string][]string),
 		closeCh:          make(chan struct{}),
 	}
 	if cfg.ThreadID != "" {
@@ -359,7 +382,9 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 	return nil
 }
 
-// Close closes the adapter transport.
+// Close closes the adapter transport. Pending mirror dispatches are cancelled
+// via the service context and awaited so Close does not return while a
+// goroutine still holds a Reply in flight.
 func (a *CodexAdapter) Close() error {
 	if a.serviceCancel != nil {
 		a.serviceCancel()
@@ -374,6 +399,8 @@ func (a *CodexAdapter) Close() error {
 	conn := a.conn
 	a.conn = nil
 	a.mu.Unlock()
+
+	a.mirrorWG.Wait()
 
 	if conn != nil {
 		return conn.Close()
@@ -763,40 +790,138 @@ func (a *CodexAdapter) handleNotification(notification codexNotificationMessage)
 	}
 
 	switch notification.Method {
+	case "item/completed":
+		a.handleItemCompleted(notification.Params)
 	case "turn/completed":
-		var completed codexTurnCompletedNotification
-		if err := json.Unmarshal(notification.Params, &completed); err != nil {
-			return
-		}
-		a.mu.Lock()
-		target, ok := a.turns[completed.Turn.ID]
-		delete(a.turns, completed.Turn.ID)
-		a.mu.Unlock()
-		if !ok {
-			return
-		}
-
-		text := lastCodexAgentMessage(completed.Turn.Items)
-		if text == "" {
-			return
-		}
-		if a.isShuttingDown() {
-			return
-		}
-		_ = replyWithChunks(a.mirrorContext(), a.session, target, text)
+		a.handleTurnCompleted(notification.Params)
 	case "turn/failed":
-		var failed struct {
-			Turn struct {
-				ID string `json:"id"`
-			} `json:"turn"`
-		}
-		if err := json.Unmarshal(notification.Params, &failed); err != nil {
+		a.handleTurnFailed(notification.Params)
+	}
+}
+
+// handleItemCompleted accumulates agentMessage text for the owning turn. The
+// codex app-server emits the reply text via `item/completed` notifications,
+// one per agent message (see codex-rs v2 protocol: ItemCompletedNotification
+// with ThreadItem::AgentMessage). Non-agent items are ignored.
+func (a *CodexAdapter) handleItemCompleted(params json.RawMessage) {
+	var completed codexItemCompletedNotification
+	if err := json.Unmarshal(params, &completed); err != nil {
+		return
+	}
+	if completed.Item.Type != "agentMessage" || completed.Item.Text == "" {
+		return
+	}
+	if completed.TurnID == "" {
+		return
+	}
+
+	a.mu.Lock()
+	if _, tracked := a.turns[completed.TurnID]; !tracked {
+		a.mu.Unlock()
+		return
+	}
+	a.turnTexts[completed.TurnID] = append(a.turnTexts[completed.TurnID], completed.Item.Text)
+	a.mu.Unlock()
+}
+
+// handleTurnCompleted flushes accumulated agent message text to discord when
+// the turn closes. The codex app-server always emits `turn/completed` with an
+// empty items slice (codex-rs/app-server/src/bespoke_event_handling.rs line
+// 1932: `items: vec![]`), so the reply text is reconstructed from the
+// per-turn buffer written by `item/completed` handlers.
+//
+// Legacy fallback: if no text was buffered but the notification itself
+// carries items (e.g. a future protocol change or a test harness), fall back
+// to the last agent message inside the payload.
+func (a *CodexAdapter) handleTurnCompleted(params json.RawMessage) {
+	var completed codexTurnCompletedNotification
+	if err := json.Unmarshal(params, &completed); err != nil {
+		return
+	}
+	turnID := completed.Turn.ID
+	if turnID == "" {
+		return
+	}
+
+	a.mu.Lock()
+	target, ok := a.turns[turnID]
+	delete(a.turns, turnID)
+	buffered := a.turnTexts[turnID]
+	delete(a.turnTexts, turnID)
+	a.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	text := strings.Join(buffered, "\n\n")
+	if text == "" {
+		text = lastCodexAgentMessage(completed.Turn.Items)
+	}
+	if text == "" {
+		return
+	}
+	if a.isShuttingDown() {
+		return
+	}
+
+	a.dispatchMirror(target, turnID, completed.ThreadID, text)
+}
+
+// handleTurnFailed clears accumulated state for a failed turn so memory is
+// bounded even when the turn never emits a successful completion.
+func (a *CodexAdapter) handleTurnFailed(params json.RawMessage) {
+	var failed struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if err := json.Unmarshal(params, &failed); err != nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.turns, failed.Turn.ID)
+	delete(a.turnTexts, failed.Turn.ID)
+	a.mu.Unlock()
+}
+
+// dispatchMirror performs the outbound discord reply in a background
+// goroutine so slow discord API calls never block the codex readLoop. The
+// goroutine is tracked by `mirrorWG` so Close can wait for in-flight mirror
+// deliveries to exit cleanly, and is bound to `serviceCtx` so shutdown
+// cancels any pending Reply/SendMessage call.
+func (a *CodexAdapter) dispatchMirror(target codexMirrorTarget, turnID string, threadID string, text string) {
+	a.mirrorWG.Add(1)
+	go func() {
+		defer a.mirrorWG.Done()
+		ctx := a.mirrorContext()
+		if err := replyWithChunks(ctx, a.session, target, text); err != nil {
+			slog.Warn("codex mirror reply failed",
+				"adapter", a.Name(),
+				"turn_id", turnID,
+				"thread_id", threadID,
+				"channel_id", target.ChannelID,
+				"message_id", target.MessageID,
+				"error", err,
+			)
 			return
 		}
-		a.mu.Lock()
-		delete(a.turns, failed.Turn.ID)
-		a.mu.Unlock()
-	}
+		slog.Info("codex mirror emitted",
+			"adapter", a.Name(),
+			"event", "mirror_emitted",
+			"turn_id", turnID,
+			"thread_id", threadID,
+			"channel_id", target.ChannelID,
+			"message_id", target.MessageID,
+			"chunk_count", mirrorChunkCount(text),
+			"char_count", len([]rune(text)),
+		)
+	}()
+}
+
+// mirrorChunkCount reports how many discord messages a mirrored reply will
+// occupy after chunking. Exposed for audit logging only.
+func mirrorChunkCount(text string) int {
+	return len(splitDiscordChunks(text, 2000))
 }
 
 // --- JSON-RPC Helpers ---
