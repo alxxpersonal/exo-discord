@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -129,6 +130,7 @@ type channelUpdateArgs struct {
 
 type channelDeleteArgs struct {
 	ChannelID string `json:"channel_id" jsonschema:"Discord channel id"`
+	Confirm   bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
 
 type channelPermissionArgs struct {
@@ -159,6 +161,13 @@ type roleUpdateArgs struct {
 type roleDeleteArgs struct {
 	GuildID string `json:"guild_id,omitempty" jsonschema:"Optional discord guild id"`
 	RoleID  string `json:"role_id" jsonschema:"Discord role id"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
+}
+
+type memberActionArgs struct {
+	GuildID string `json:"guild_id" jsonschema:"Discord guild id"`
+	UserID  string `json:"user_id" jsonschema:"Discord user id"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
 
 type roleAssignArgs struct {
@@ -170,12 +179,14 @@ type roleAssignArgs struct {
 type messageDeleteArgs struct {
 	ChannelID string `json:"channel_id" jsonschema:"Discord channel id"`
 	MessageID string `json:"message_id" jsonschema:"Discord message id"`
+	Confirm   bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
 
 type bulkDeleteArgs struct {
 	ChannelID string `json:"channel_id" jsonschema:"Discord channel id"`
 	UserID    string `json:"user_id" jsonschema:"Discord user id"`
 	BeforeID  string `json:"before_id,omitempty" jsonschema:"Delete messages before this message id"`
+	Confirm   bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
 
 type embedPostArgs struct {
@@ -228,6 +239,7 @@ type scaffoldArgs struct {
 	Path         string `json:"path" jsonschema:"Path to a YAML scaffold file"`
 	Apply        bool   `json:"apply,omitempty" jsonschema:"Apply the plan instead of just diffing"`
 	DeleteExtras bool   `json:"delete_extras,omitempty" jsonschema:"Delete live roles and channels missing from the scaffold"`
+	Confirm      bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
 
 type scaffoldResult struct {
@@ -236,13 +248,16 @@ type scaffoldResult struct {
 }
 
 type execArgs struct {
-	Path   string `json:"path,omitempty" jsonschema:"Optional path to a Go source file"`
-	Source string `json:"source,omitempty" jsonschema:"Inline Go source"`
+	Path    string `json:"path,omitempty" jsonschema:"Optional path to a Go source file"`
+	Source  string `json:"source,omitempty" jsonschema:"Inline Go source"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"Set true to confirm this destructive action"`
 }
 
 type execResult struct {
 	OK bool `json:"ok"`
 }
+
+const destructiveConfirmError = "destructive action requires confirm=true"
 
 // --- Tool Registration ---
 
@@ -453,6 +468,9 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 		Name:        "manage_channel_delete",
 		Description: "Delete a channel.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args channelDeleteArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, reactResult{}, err
+		}
 		err := manager.DeleteChannel(ctx, args.ChannelID)
 		return nil, reactResult{OK: err == nil}, err
 	})
@@ -524,6 +542,9 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 		Name:        "manage_role_delete",
 		Description: "Delete a role.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args roleDeleteArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, reactResult{}, err
+		}
 		err := manager.DeleteRole(ctx, discordpkg.RoleDeleteRequest{
 			GuildID: args.GuildID,
 			RoleID:  args.RoleID,
@@ -577,7 +598,10 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "manage_member_kick",
 		Description: "Kick a guild member.",
-	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args userGuildArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args memberActionArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, reactResult{}, err
+		}
 		err := manager.KickMember(ctx, discordpkg.GuildUserRequest{
 			GuildID: args.GuildID,
 			UserID:  args.UserID,
@@ -588,7 +612,10 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "manage_member_ban",
 		Description: "Ban a guild member.",
-	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args userGuildArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args memberActionArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, reactResult{}, err
+		}
 		err := manager.BanMember(ctx, discordpkg.GuildUserRequest{
 			GuildID: args.GuildID,
 			UserID:  args.UserID,
@@ -630,6 +657,9 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 		Name:        "manage_message_delete",
 		Description: "Delete a Discord message.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args messageDeleteArgs) (*sdkmcp.CallToolResult, reactResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, reactResult{}, err
+		}
 		err := manager.DeleteManagedMessage(ctx, discordpkg.MessageTarget{
 			ChannelID: args.ChannelID,
 			MessageID: args.MessageID,
@@ -641,6 +671,9 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 		Name:        "manage_message_bulk_delete",
 		Description: "Bulk delete messages by author in a channel.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args bulkDeleteArgs) (*sdkmcp.CallToolResult, discordpkg.BulkDeleteResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, discordpkg.BulkDeleteResult{}, err
+		}
 		result, err := manager.BulkDeleteMessages(ctx, discordpkg.BulkDeleteRequest{
 			ChannelID: args.ChannelID,
 			UserID:    args.UserID,
@@ -802,6 +835,10 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 			return nil, scaffoldResult{Applied: false, Plan: plan}, nil
 		}
 
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, scaffoldResult{}, err
+		}
+
 		plan, err := scaffoldpkg.Apply(ctx, manager, spec, scaffoldpkg.ApplyOptions{
 			DeleteExtras: args.DeleteExtras,
 		})
@@ -815,6 +852,9 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 		Name:        "manage_exec",
 		Description: "Execute Go code through yaegi with a ManagerClient surface.",
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args execArgs) (*sdkmcp.CallToolResult, execResult, error) {
+		if err := requireConfirm(args.Confirm); err != nil {
+			return nil, execResult{}, err
+		}
 		source := args.Source
 		if args.Path != "" {
 			payload, err := os.ReadFile(args.Path)
@@ -832,4 +872,11 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func requireConfirm(confirm bool) error {
+	if confirm {
+		return nil
+	}
+	return fmt.Errorf(destructiveConfirmError)
 }

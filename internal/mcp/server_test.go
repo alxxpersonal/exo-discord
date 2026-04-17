@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
@@ -548,7 +549,7 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-channel-delete",
 			tool: "manage_channel_delete",
-			args: map[string]any{"channel_id": "chan-1"},
+			args: map[string]any{"channel_id": "chan-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
 				if session.channelDeleteID != "chan-1" {
@@ -614,7 +615,7 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-role-delete",
 			tool: "manage_role_delete",
-			args: map[string]any{"role_id": "role-1"},
+			args: map[string]any{"role_id": "role-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
 				if session.roleDelete.RoleID != "role-1" {
@@ -669,7 +670,7 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-member-kick",
 			tool: "manage_member_kick",
-			args: map[string]any{"guild_id": "guild-1", "user_id": "user-1"},
+			args: map[string]any{"guild_id": "guild-1", "user_id": "user-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
 				if session.memberRequest.GuildID != "guild-1" || session.memberRequest.UserID != "user-1" {
@@ -680,7 +681,7 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-member-ban",
 			tool: "manage_member_ban",
-			args: map[string]any{"guild_id": "guild-1", "user_id": "user-1"},
+			args: map[string]any{"guild_id": "guild-1", "user_id": "user-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
 				if session.memberRequest.GuildID != "guild-1" || session.memberRequest.UserID != "user-1" {
@@ -713,7 +714,7 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-message-delete",
 			tool: "manage_message_delete",
-			args: map[string]any{"channel_id": "chan-1", "message_id": "msg-1"},
+			args: map[string]any{"channel_id": "chan-1", "message_id": "msg-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
 				if session.messageDelete.ChannelID != "chan-1" || session.messageDelete.MessageID != "msg-1" {
@@ -724,7 +725,7 @@ func TestServerCallTools(t *testing.T) {
 		{
 			name: "manage-message-bulk-delete",
 			tool: "manage_message_bulk_delete",
-			args: map[string]any{"channel_id": "chan-1", "user_id": "user-1"},
+			args: map[string]any{"channel_id": "chan-1", "user_id": "user-1", "confirm": true},
 			check: func(t *testing.T, session *fakeSession) {
 				t.Helper()
 				if session.bulkDelete.ChannelID != "chan-1" || session.bulkDelete.UserID != "user-1" {
@@ -846,6 +847,56 @@ func TestServerCallToolErrors(t *testing.T) {
 	}
 }
 
+func TestServerRejectsDestructiveToolsWithoutConfirm(t *testing.T) {
+	t.Parallel()
+
+	specPath := t.TempDir() + "/scaffold.yaml"
+	if err := os.WriteFile(specPath, []byte("guild:\n  id: guild-1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{name: "channel-delete", tool: "manage_channel_delete", args: map[string]any{"channel_id": "chan-1"}},
+		{name: "role-delete", tool: "manage_role_delete", args: map[string]any{"guild_id": "guild-1", "role_id": "role-1"}},
+		{name: "member-kick", tool: "manage_member_kick", args: map[string]any{"guild_id": "guild-1", "user_id": "user-1"}},
+		{name: "member-ban", tool: "manage_member_ban", args: map[string]any{"guild_id": "guild-1", "user_id": "user-1"}},
+		{name: "message-delete", tool: "manage_message_delete", args: map[string]any{"channel_id": "chan-1", "message_id": "msg-1"}},
+		{name: "message-bulk-delete", tool: "manage_message_bulk_delete", args: map[string]any{"channel_id": "chan-1", "user_id": "user-1"}},
+		{name: "scaffold-apply", tool: "manage_scaffold", args: map[string]any{"path": specPath, "apply": true}},
+		{name: "exec", tool: "manage_exec", args: map[string]any{"source": "package main\nfunc Run(client *ManagerClient) error { return nil }\n"}},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, clientSession := connectTestServer(t, &fakeSession{})
+			t.Cleanup(func() {
+				_ = clientSession.Close()
+			})
+
+			result, err := clientSession.CallTool(context.Background(), &sdkmcp.CallToolParams{
+				Name:      test.tool,
+				Arguments: test.args,
+			})
+			if err != nil {
+				t.Fatalf("CallTool(%s) error = %v", test.tool, err)
+			}
+			if !result.IsError {
+				t.Fatalf("CallTool(%s) IsError = false, want true", test.tool)
+			}
+			if len(result.Content) == 0 || !strings.Contains(result.Content[0].(*sdkmcp.TextContent).Text, destructiveConfirmError) {
+				t.Fatalf("CallTool(%s) content = %#v", test.tool, result.Content)
+			}
+		})
+	}
+}
+
 func TestServerCallManageInteractionListenScaffoldAndExec(t *testing.T) {
 	t.Parallel()
 
@@ -905,7 +956,7 @@ func TestServerCallManageInteractionListenScaffoldAndExec(t *testing.T) {
 
 		result, err := clientSession.CallTool(context.Background(), &sdkmcp.CallToolParams{
 			Name:      "manage_exec",
-			Arguments: map[string]any{"source": "package main\nfunc Run(client *ManagerClient) error { return client.DeleteChannel(\"chan-1\") }\n"},
+			Arguments: map[string]any{"source": "package main\nfunc Run(client *ManagerClient) error { return client.DeleteChannel(\"chan-1\") }\n", "confirm": true},
 		})
 		if err != nil {
 			t.Fatalf("CallTool(exec) error = %v", err)
