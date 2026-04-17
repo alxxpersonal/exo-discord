@@ -358,12 +358,19 @@ func TestCodexAdapterReadLoopDispatchesResponsesAndNotifications(t *testing.T) {
 		pending:         map[int64]chan codexResponseMessage{1: responseCh},
 		mirrorResponses: true,
 		session:         session,
+		turnTexts:       make(map[string][]string),
 		turns: map[string]codexMirrorTarget{
 			"turn-1": {ChannelID: "chan-1", MessageID: "msg-1"},
 		},
 	}
 
 	adapter.readLoop(context.Background())
+
+	// mirror dispatch is async, wait for the goroutine to land.
+	waitUntil(t, time.Second, func() bool {
+		return session.replyCount() == 1
+	})
+	adapter.mirrorWG.Wait()
 
 	select {
 	case response := <-responseCh:
@@ -389,6 +396,7 @@ func TestCodexAdapterHandleNotificationMirrorsReply(t *testing.T) {
 	adapter := &CodexAdapter{
 		mirrorResponses: true,
 		session:         session,
+		turnTexts:       make(map[string][]string),
 		turns: map[string]codexMirrorTarget{
 			"turn-1": {
 				ChannelID: "chan-1",
@@ -398,6 +406,9 @@ func TestCodexAdapterHandleNotificationMirrorsReply(t *testing.T) {
 		},
 	}
 
+	// legacy shape: items inside the turn/completed payload itself. real
+	// codex servers never emit this, but the fallback path is kept for
+	// robustness against protocol churn.
 	longText := strings.Repeat("a", 2105)
 	payload, err := json.Marshal(codexTurnCompletedNotification{
 		ThreadID: "thread-1",
@@ -416,6 +427,8 @@ func TestCodexAdapterHandleNotificationMirrorsReply(t *testing.T) {
 		Method: "turn/completed",
 		Params: payload,
 	})
+
+	adapter.mirrorWG.Wait()
 
 	if session.replyCount() != 1 {
 		t.Fatalf("reply count = %d, want 1", session.replyCount())
@@ -1604,4 +1617,242 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition was not met before timeout")
+}
+
+// --- Mirror Response Regression Tests ---
+
+// TestCodexAdapterMirrorsCompletedTurnReplyBackToDiscord feeds the adapter
+// the exact wire shape codex app-server emits after `turn/start`: one or
+// more `item/completed` notifications carrying agentMessage text, then a
+// `turn/completed` notification whose `turn.items` slice is empty. The
+// adapter must reconstruct the reply text from the buffered item stream and
+// call Session.Reply with it.
+func TestCodexAdapterMirrorsCompletedTurnReplyBackToDiscord(t *testing.T) {
+	t.Parallel()
+
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses: true,
+		session:         session,
+		turnTexts:       make(map[string][]string),
+		turns: map[string]codexMirrorTarget{
+			"turn-real": {
+				ChannelID: "chan-1",
+				GuildID:   "guild-1",
+				MessageID: "msg-in",
+			},
+		},
+	}
+
+	itemPayload, err := json.Marshal(codexItemCompletedNotification{
+		ThreadID: "thread-real",
+		TurnID:   "turn-real",
+		Item: codexThreadItem{
+			Type: "agentMessage",
+			ID:   "item-1",
+			Text: "hello from codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(item) error = %v", err)
+	}
+	// exact shape codex emits: params carries threadId + turn{id, items:[]}.
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-real",
+		Turn:     codexTurn{ID: "turn-real", Items: nil},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+
+	adapter.handleNotification(codexNotificationMessage{Method: "item/completed", Params: itemPayload})
+	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
+
+	adapter.mirrorWG.Wait()
+
+	if session.replyCount() != 1 {
+		t.Fatalf("reply count = %d, want 1", session.replyCount())
+	}
+	reply := session.firstReply()
+	if reply.Text != "hello from codex" {
+		t.Fatalf("reply text = %q, want %q", reply.Text, "hello from codex")
+	}
+	if reply.ReplyToMessageID != "msg-in" {
+		t.Fatalf("reply target = %q, want msg-in", reply.ReplyToMessageID)
+	}
+	if reply.ChannelID != "chan-1" {
+		t.Fatalf("reply channel = %q, want chan-1", reply.ChannelID)
+	}
+}
+
+// TestCodexAdapterDoesNotMirrorWhenFlagDisabled proves that the
+// mirror_responses feature flag actually gates the outbound reply. Turning
+// it off must short-circuit both item buffering and Reply dispatch.
+func TestCodexAdapterDoesNotMirrorWhenFlagDisabled(t *testing.T) {
+	t.Parallel()
+
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses: false,
+		session:         session,
+		turnTexts:       make(map[string][]string),
+		turns: map[string]codexMirrorTarget{
+			"turn-real": {ChannelID: "chan-1", MessageID: "msg-in"},
+		},
+	}
+
+	itemPayload, err := json.Marshal(codexItemCompletedNotification{
+		ThreadID: "thread-real",
+		TurnID:   "turn-real",
+		Item:     codexThreadItem{Type: "agentMessage", ID: "i", Text: "should be ignored"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(item) error = %v", err)
+	}
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-real",
+		Turn:     codexTurn{ID: "turn-real"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+
+	adapter.handleNotification(codexNotificationMessage{Method: "item/completed", Params: itemPayload})
+	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
+
+	adapter.mirrorWG.Wait()
+
+	if session.replyCount() != 0 {
+		t.Fatalf("reply count = %d, want 0 when mirror_responses is off", session.replyCount())
+	}
+	if session.sendCount() != 0 {
+		t.Fatalf("send count = %d, want 0 when mirror_responses is off", session.sendCount())
+	}
+}
+
+// TestCodexAdapterMirrorChunksLongResponse verifies that a codex reply
+// exceeding the discord 2000-char message limit is split across one
+// `Reply` plus N-1 follow-up `SendMessage` calls. It also proves multiple
+// item/completed notifications for the same turn are joined.
+func TestCodexAdapterMirrorChunksLongResponse(t *testing.T) {
+	t.Parallel()
+
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses: true,
+		session:         session,
+		turnTexts:       make(map[string][]string),
+		turns: map[string]codexMirrorTarget{
+			"turn-long": {ChannelID: "chan-1", MessageID: "msg-in"},
+		},
+	}
+
+	// two items totaling 4004 runes, which spans 3 chunks (2000+2000+4).
+	first := strings.Repeat("a", 2000)
+	second := strings.Repeat("b", 2000)
+	for _, text := range []string{first, second} {
+		payload, err := json.Marshal(codexItemCompletedNotification{
+			ThreadID: "thread-long",
+			TurnID:   "turn-long",
+			Item:     codexThreadItem{Type: "agentMessage", ID: "i", Text: text},
+		})
+		if err != nil {
+			t.Fatalf("Marshal(item) error = %v", err)
+		}
+		adapter.handleNotification(codexNotificationMessage{Method: "item/completed", Params: payload})
+	}
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-long",
+		Turn:     codexTurn{ID: "turn-long"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
+
+	adapter.mirrorWG.Wait()
+
+	if session.replyCount() != 1 {
+		t.Fatalf("reply count = %d, want 1", session.replyCount())
+	}
+	// joined text: 2000 + "\n\n" + 2000 = 4002 runes => 3 chunks (2000, 2000, 2).
+	if got := session.sendCount(); got != 2 {
+		t.Fatalf("send count = %d, want 2 follow-up chunks", got)
+	}
+	if got := len([]rune(session.firstReply().Text)); got != 2000 {
+		t.Fatalf("first chunk len = %d, want 2000", got)
+	}
+}
+
+// TestCodexAdapterMirrorRespectsShutdown triggers Close() mid-reply and
+// asserts the pending mirror dispatch aborts cleanly: the blocking Reply
+// unblocks via ctx.Done, no follow-up SendMessage fires, and Close waits
+// for the goroutine via the mirror waitgroup before returning.
+func TestCodexAdapterMirrorRespectsShutdown(t *testing.T) {
+	t.Parallel()
+
+	session := &blockingMirrorSession{
+		replyStarted: make(chan struct{}),
+		replyDone:    make(chan struct{}),
+	}
+	serviceCtx, serviceCancel := context.WithCancel(context.Background())
+	defer serviceCancel()
+	adapter := &CodexAdapter{
+		mirrorResponses: true,
+		session:         session,
+		serviceCtx:      serviceCtx,
+		serviceCancel:   serviceCancel,
+		closeCh:         make(chan struct{}),
+		turnTexts:       make(map[string][]string),
+		turns: map[string]codexMirrorTarget{
+			"turn-slow": {ChannelID: "chan-1", MessageID: "msg-in"},
+		},
+	}
+
+	itemPayload, err := json.Marshal(codexItemCompletedNotification{
+		ThreadID: "thread-slow",
+		TurnID:   "turn-slow",
+		Item: codexThreadItem{
+			Type: "agentMessage",
+			ID:   "i",
+			Text: strings.Repeat("z", 2200),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(item) error = %v", err)
+	}
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-slow",
+		Turn:     codexTurn{ID: "turn-slow"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+
+	adapter.handleNotification(codexNotificationMessage{Method: "item/completed", Params: itemPayload})
+	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
+
+	<-session.replyStarted
+
+	closeErrCh := make(chan error, 1)
+	go func() { closeErrCh <- adapter.Close() }()
+
+	select {
+	case <-session.replyDone:
+	case <-time.After(time.Second):
+		t.Fatal("reply did not stop after Close()")
+	}
+
+	select {
+	case err := <-closeErrCh:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not return after mirror goroutine exited")
+	}
+
+	if got := session.sendCount.Load(); got != 0 {
+		t.Fatalf("send count = %d, want 0", got)
+	}
 }
