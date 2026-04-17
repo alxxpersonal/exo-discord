@@ -60,6 +60,20 @@ Inbound delivery is append-only and audited. `~/.exo-discord/channel-audit.log` 
 
 Permission relay is a future feature and is not wired in this plugin yet. Leave `channel.claude.permission_relay = false`, which is now the default, until the request or reply handler exists.
 
+## Codex Thread Namespace
+
+Codex maintains threads inside the app-server process a client is connected to. The app-server that `codex app-server --listen ws://...` spawns has its own in-memory thread table: a thread id that was created by `codex` (interactive shell, source kind `cli`) is not the same thing as a thread loaded in the app-server. The rollout files on disk at `$CODEX_HOME/rollouts/` are shared, so an interactive thread id can usually be rehydrated via `thread/resume`, but `turn/start` requires the thread to be loaded in memory first.
+
+`exo-discord codex-bridge` handles this automatically:
+
+1. Try `turn/start` with the requested thread id (from `--thread` or `~/.exo-discord/codex-thread.json`).
+2. On `thread not found`: call `thread/resume` with the same id so the app-server pulls it from disk. This is the typical path when the id was taken from an interactive codex shell.
+3. If resume fails: call `thread/list` to discover another live thread.
+4. If discovery is empty AND `--auto-create-thread` is on (default): call `thread/start` to open a brand new thread on the app-server, cache it, and retry `turn/start`.
+5. If `--no-auto-create-thread` (or `channel.codex.auto_create_thread = false`) is set and discovery is empty: fail with a clear error listing the recovery options.
+
+Every injection records `original_thread_id`, `final_thread_id`, `fallback_path` (`none | resume | discover | auto_create | error`), and `result` to the runtime slog stream and to `channel-audit.log`.
+
 ## Development Activation
 
 Install the local bundle:
