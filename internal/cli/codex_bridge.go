@@ -18,12 +18,13 @@ import (
 
 func newCodexBridgeCommand(env Environment) *cobra.Command {
 	var (
-		transport        string
-		socketPath       string
-		websocketURL     string
-		threadID         string
-		mirrorResponses  bool
-		autoCreateThread bool
+		transport          string
+		socketPath         string
+		websocketURL       string
+		threadID           string
+		mirrorResponses    bool
+		autoCreateThread   bool
+		noAutoCreateThread bool
 	)
 
 	cmd := &cobra.Command{
@@ -52,6 +53,9 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 			}
 			if !cmd.Flags().Changed("auto-create-thread") {
 				autoCreateThread = resolved.Config.Channel.Codex.AutoCreateThread
+			}
+			if cmd.Flags().Changed("no-auto-create-thread") {
+				autoCreateThread = false
 			}
 
 			if err := validateCodexBridgeFlags(transport, socketPath, websocketURL); err != nil {
@@ -123,6 +127,8 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 	cmd.Flags().StringVar(&threadID, "thread", "", "explicit codex thread id")
 	cmd.Flags().BoolVar(&mirrorResponses, "mirror-responses", false, "reply back to Discord when Codex completes a turn")
 	cmd.Flags().BoolVar(&autoCreateThread, "auto-create-thread", true, "create a new codex thread when the requested thread is missing from the app-server namespace")
+	cmd.Flags().BoolVar(&noAutoCreateThread, "no-auto-create-thread", false, "disable automatic codex thread creation when the requested thread is missing from the app-server namespace")
+	_ = cmd.Flags().MarkHidden("no-auto-create-thread")
 	return cmd
 }
 

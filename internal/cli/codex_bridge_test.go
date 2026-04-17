@@ -236,3 +236,42 @@ func TestCodexBridgeCommandHotReloadsAccessAllowlist(t *testing.T) {
 		t.Fatalf("pairing message = %q, want no pairing prompt after reload", got)
 	}
 }
+
+func TestCodexBridgeCommandNoAutoCreateThreadFlagDisablesAutoCreate(t *testing.T) {
+	t.Parallel()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, "mode = \"bot\"\nbot_token = \"secret\"\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	session := &fakeSession{}
+	var gotCfg channelbridge.Config
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		Context: func() context.Context {
+			return ctx
+		},
+		NewSession: func(config.ResolvedConfig) (discordpkg.Session, error) {
+			return session, nil
+		},
+		NewChannelAdapter: func(cfg channelbridge.Config, hookEnv channelbridge.HookEnv) (channelAdapter, error) {
+			gotCfg = cfg
+			return fakeChannelAdapter{}, nil
+		},
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"codex-bridge", "--transport", "unix", "--socket", "/tmp/broker.sock", "--no-auto-create-thread"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotCfg.Codex.AutoCreateThread {
+		t.Fatalf("codex config autoCreateThread = %t, want false", gotCfg.Codex.AutoCreateThread)
+	}
+}
