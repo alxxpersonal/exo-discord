@@ -18,6 +18,13 @@ The plugin entrypoint runs:
 exo-discord channel-plugin
 ```
 
+Optional global install so `.mcp.json` can resolve `"command": "exo-discord"` from any directory:
+
+```bash
+make build
+make install-bin
+```
+
 Operational notes:
 
 - `exo-discord channel-plugin` reuses the same MCP tool surface as `exo-discord mcp serve`, so Claude can still call `reply`, `react`, `edit_message`, `fetch_history`, and `download_attachment`.
