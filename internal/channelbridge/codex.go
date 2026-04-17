@@ -860,11 +860,13 @@ func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedT
 	return value.(codexRecoverResult), nil
 }
 
-// recoverThread attempts to recover from a thread-not-found error by
-// resuming the requested thread from on-disk rollouts, falling back to
-// discovery, then to auto-creation via thread/start. Returns the new
-// thread id, a label identifying which fallback path succeeded, and the
-// origin describing where the recovered id came from.
+// recoverThread runs the fallback chain after a thread-not-found on
+// turn/start: it attempts thread/resume (only when the id could plausibly
+// exist on disk), then thread/list discovery, then thread/start auto-create
+// (if enabled), then returns the recovered id so the caller can retry
+// turn/start with it. Returns the new thread id, a label identifying which
+// fallback path succeeded, and the origin describing where the recovered
+// id came from.
 func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID string, explicit bool, origin codexThreadOrigin) (string, string, codexThreadOrigin, error) {
 	// try thread/resume first when the caller supplied an explicit id that
 	// could plausibly exist in $CODEX_HOME/rollouts. ids minted by a prior
