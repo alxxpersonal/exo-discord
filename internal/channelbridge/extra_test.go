@@ -119,6 +119,42 @@ func (m *mirrorSession) firstReply() discordpkg.ReplyRequest {
 	return m.replys[0]
 }
 
+type blockingMirrorSession struct {
+	replyStarted chan struct{}
+	replyDone    chan struct{}
+	sendCount    atomic.Int32
+}
+
+func (m *blockingMirrorSession) Open(context.Context) error                 { return nil }
+func (m *blockingMirrorSession) Close(context.Context) error                { return nil }
+func (m *blockingMirrorSession) Mode() string                               { return "bot" }
+func (m *blockingMirrorSession) Subscribe(discordpkg.InboundHandler) func() { return func() {} }
+func (m *blockingMirrorSession) React(context.Context, discordpkg.ReactRequest) error {
+	return nil
+}
+func (m *blockingMirrorSession) EditMessage(context.Context, discordpkg.EditRequest) (discordpkg.SentMessage, error) {
+	return discordpkg.SentMessage{}, nil
+}
+func (m *blockingMirrorSession) FetchHistory(context.Context, discordpkg.HistoryRequest) ([]discordpkg.Message, error) {
+	return nil, nil
+}
+func (m *blockingMirrorSession) DownloadAttachments(context.Context, discordpkg.DownloadRequest) ([]discordpkg.DownloadedFile, error) {
+	return nil, nil
+}
+func (m *blockingMirrorSession) SetStatus(context.Context, discordpkg.StatusRequest) error {
+	return nil
+}
+func (m *blockingMirrorSession) SendMessage(_ context.Context, req discordpkg.SendRequest) (discordpkg.SentMessage, error) {
+	m.sendCount.Add(1)
+	return discordpkg.SentMessage{}, nil
+}
+func (m *blockingMirrorSession) Reply(ctx context.Context, req discordpkg.ReplyRequest) (discordpkg.SentMessage, error) {
+	close(m.replyStarted)
+	<-ctx.Done()
+	close(m.replyDone)
+	return discordpkg.SentMessage{}, ctx.Err()
+}
+
 type fakeThreadProvider struct {
 	threads []codexThreadSummary
 	err     error
@@ -391,6 +427,73 @@ func TestCodexAdapterHandleNotificationMirrorsReply(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterHandleNotificationStopsReplyWhenClosed(t *testing.T) {
+	t.Parallel()
+
+	session := &blockingMirrorSession{
+		replyStarted: make(chan struct{}),
+		replyDone:    make(chan struct{}),
+	}
+	serviceCtx, serviceCancel := context.WithCancel(context.Background())
+	adapter := &CodexAdapter{
+		mirrorResponses: true,
+		session:         session,
+		serviceCtx:      serviceCtx,
+		serviceCancel:   serviceCancel,
+		closeCh:         make(chan struct{}),
+		turns: map[string]codexMirrorTarget{
+			"turn-1": {
+				ChannelID: "chan-1",
+				GuildID:   "guild-1",
+				MessageID: "msg-1",
+			},
+		},
+	}
+
+	payload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-1",
+		Turn: codexTurn{
+			ID: "turn-1",
+			Items: []codexTurnItem{
+				{Type: "agentMessage", Text: strings.Repeat("a", 2105)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		adapter.handleNotification(codexNotificationMessage{
+			Method: "turn/completed",
+			Params: payload,
+		})
+		close(done)
+	}()
+
+	<-session.replyStarted
+	if err := adapter.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case <-session.replyDone:
+	case <-time.After(time.Second):
+		t.Fatal("reply did not stop after Close()")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleNotification did not return after Close()")
+	}
+
+	if got := session.sendCount.Load(); got != 0 {
+		t.Fatalf("send count = %d, want 0", got)
+	}
+}
+
 func TestCodexAdapterHandleNotificationTurnFailedClearsPendingTurn(t *testing.T) {
 	t.Parallel()
 
@@ -568,6 +671,135 @@ func TestCodexAdapterEnsureConnectedReconnectsAfterInitializeFailure(t *testing.
 		},
 	})
 	if err != nil {
+		t.Fatalf("second Deliver() error = %v", err)
+	}
+
+	if got := atomic.LoadInt32(&acceptCount); got != 2 {
+		t.Fatalf("connect attempts = %d, want 2", got)
+	}
+
+	_ = listener.Close()
+	<-done
+}
+
+func TestCodexAdapterEnsureConnectedReconnectsAfterReadLoopError(t *testing.T) {
+	t.Parallel()
+
+	socketPath := "/tmp/exo-discord-read-reconnect-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".sock"
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	var acceptCount int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+
+			attempt := atomic.AddInt32(&acceptCount, 1)
+			go func(attempt int32, conn net.Conn) {
+				defer func() {
+					_ = conn.Close()
+				}()
+
+				reader := bufio.NewReader(conn)
+				for step := 0; step < 3; step++ {
+					line, readErr := reader.ReadBytes('\n')
+					if readErr != nil {
+						return
+					}
+
+					var request map[string]any
+					if err := json.Unmarshal(line, &request); err != nil {
+						t.Errorf("Unmarshal() error = %v", err)
+						return
+					}
+
+					method := request["method"].(string)
+					switch step {
+					case 0:
+						if method != "initialize" {
+							t.Errorf("attempt %d step 0 method = %q, want initialize", attempt, method)
+							return
+						}
+						writeUnixResponse(conn, request["id"], map[string]any{})
+					case 1:
+						if method != "initialized" {
+							t.Errorf("attempt %d step 1 method = %q, want initialized", attempt, method)
+							return
+						}
+					case 2:
+						if method != "turn/start" {
+							t.Errorf("attempt %d step 2 method = %q, want turn/start", attempt, method)
+							return
+						}
+						writeUnixResponse(conn, request["id"], map[string]any{
+							"turn": map[string]any{
+								"id": "turn-" + strconv.FormatInt(int64(attempt), 10),
+							},
+						})
+						return
+					}
+				}
+			}(attempt, conn)
+		}
+	}()
+
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:  codexTransportUnix,
+		SocketPath: socketPath,
+		ThreadID:   "thread-1",
+	}, HookEnv{
+		HomeDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	adapter.reconnectBackoff = []time.Duration{0}
+
+	firstEvent := Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	}
+	if err := adapter.Deliver(context.Background(), firstEvent); err != nil {
+		t.Fatalf("first Deliver() error = %v", err)
+	}
+
+	waitUntil(t, time.Second, func() bool {
+		adapter.mu.Lock()
+		defer adapter.mu.Unlock()
+		return adapter.conn == nil && adapter.closeErr != nil
+	})
+
+	secondEvent := Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-2",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello again",
+			Timestamp:      time.Now().UTC(),
+		},
+	}
+	if err := adapter.Deliver(context.Background(), secondEvent); err != nil {
 		t.Fatalf("second Deliver() error = %v", err)
 	}
 

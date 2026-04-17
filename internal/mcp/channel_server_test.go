@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alxxpersonal/exo-discord/internal/buildinfo"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -32,7 +33,7 @@ func TestServerInitializeIncludesClaudeChannelCapabilities(t *testing.T) {
 
 	client := sdkmcp.NewClient(&sdkmcp.Implementation{
 		Name:    "test-client",
-		Version: "0.1.0",
+		Version: buildinfo.Version,
 	}, nil)
 	session, err := client.Connect(context.Background(), clientTransport, nil)
 	if err != nil {
@@ -79,7 +80,7 @@ func TestServerInitializeOmitsPermissionCapabilityWhenDisabled(t *testing.T) {
 
 	client := sdkmcp.NewClient(&sdkmcp.Implementation{
 		Name:    "test-client",
-		Version: "0.1.0",
+		Version: buildinfo.Version,
 	}, nil)
 	session, err := client.Connect(context.Background(), clientTransport, nil)
 	if err != nil {
@@ -141,7 +142,7 @@ func TestServerWaitUntilReadyReturnsAfterInitialization(t *testing.T) {
 
 	client := sdkmcp.NewClient(&sdkmcp.Implementation{
 		Name:    "test-client",
-		Version: "0.1.0",
+		Version: buildinfo.Version,
 	}, nil)
 	session, err := client.Connect(context.Background(), clientTransport, nil)
 	if err != nil {

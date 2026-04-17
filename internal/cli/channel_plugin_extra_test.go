@@ -58,6 +58,85 @@ func TestChannelDispatchHookBehaviors(t *testing.T) {
 	}
 }
 
+func TestChannelDispatchHookDrainWaitsForInflightDispatch(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	dispatchHook := &channelDispatchHook{
+		dispatch: func(context.Context, hook.Envelope) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = dispatchHook.Decide(context.Background(), hook.Envelope{})
+		close(done)
+	}()
+
+	<-started
+
+	drainDone := make(chan int64, 1)
+	go func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		drainDone <- dispatchHook.Drain(drainCtx)
+	}()
+
+	select {
+	case remaining := <-drainDone:
+		t.Fatalf("Drain() returned early with %d remaining", remaining)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case remaining := <-drainDone:
+		if remaining != 0 {
+			t.Fatalf("Drain() remaining = %d, want 0", remaining)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Drain() did not return after dispatch completed")
+	}
+
+	<-done
+}
+
+func TestChannelDispatchHookDrainReturnsDroppedEventsOnTimeout(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	dispatchHook := &channelDispatchHook{
+		dispatch: func(context.Context, hook.Envelope) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = dispatchHook.Decide(context.Background(), hook.Envelope{})
+		close(done)
+	}()
+
+	<-started
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if remaining := dispatchHook.Drain(drainCtx); remaining != 1 {
+		t.Fatalf("Drain() remaining = %d, want 1", remaining)
+	}
+
+	close(release)
+	<-done
+}
+
 func TestEventFromEnvelopeCopiesFields(t *testing.T) {
 	t.Parallel()
 

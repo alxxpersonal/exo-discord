@@ -21,6 +21,7 @@ const (
 )
 
 var safeClaudeMetaKeyRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+var claudeCloseTagRE = regexp.MustCompile(`(?i)</\s*channel\s*>`)
 
 // --- Types ---
 
@@ -189,7 +190,7 @@ func normalizeClaudeMeta(meta map[string]any) orderedClaudeMeta {
 }
 
 func sanitizeClaudeContent(content string) string {
-	return strings.ReplaceAll(content, "</channel>", "<\\/channel>")
+	return claudeCloseTagRE.ReplaceAllString(content, "<\\/channel>")
 }
 
 func claudeAttachmentSummary(attachments []AttachmentEvent) string {

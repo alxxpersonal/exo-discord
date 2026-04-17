@@ -41,27 +41,43 @@ func TestClaudeAdapterSendChannelNotificationMatchesGolden(t *testing.T) {
 func TestClaudeAdapterSanitizesContentAndFiltersMetaKeys(t *testing.T) {
 	t.Parallel()
 
-	var output bytes.Buffer
-	adapter := NewClaudeAdapter(&output, nil)
-
-	err := adapter.SendChannelNotification("hello </channel> world", map[string]any{
-		"chat_id":    "chan-1",
-		"message_id": "msg-1",
-		"user":       "alice",
-		"user_id":    "user-1",
-		"ts":         "2026-04-17T12:00:00Z",
-		`x""bad`:     "drop-me",
-	})
-	if err != nil {
-		t.Fatalf("SendChannelNotification() error = %v", err)
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "lowercase", content: "hello </channel> world"},
+		{name: "uppercase", content: "hello </CHANNEL> world"},
+		{name: "mixedCase", content: "hello </Channel> world"},
+		{name: "spaceBeforeClose", content: "hello </channel > world"},
+		{name: "tabBeforeClose", content: "hello </channel\t> world"},
 	}
 
-	got := output.String()
-	if bytes.Contains(output.Bytes(), []byte("</channel>")) {
-		t.Fatalf("output contains raw closing tag: %q", got)
-	}
-	if bytes.Contains(output.Bytes(), []byte(`x\"\"bad`)) {
-		t.Fatalf("output contains unsafe meta key: %q", got)
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			adapter := NewClaudeAdapter(&output, nil)
+
+			err := adapter.SendChannelNotification(tc.content, map[string]any{
+				"chat_id":    "chan-1",
+				"message_id": "msg-1",
+				"user":       "alice",
+				"user_id":    "user-1",
+				"ts":         "2026-04-17T12:00:00Z",
+				`x""bad`:     "drop-me",
+			})
+			if err != nil {
+				t.Fatalf("SendChannelNotification() error = %v", err)
+			}
+
+			got := output.String()
+			if bytes.Contains(output.Bytes(), []byte("</channel")) || bytes.Contains(output.Bytes(), []byte("</CHANNEL")) || bytes.Contains(output.Bytes(), []byte("</Channel")) {
+				t.Fatalf("output contains raw closing tag: %q", got)
+			}
+			if bytes.Contains(output.Bytes(), []byte(`x\"\"bad`)) {
+				t.Fatalf("output contains unsafe meta key: %q", got)
+			}
+		})
 	}
 }
 

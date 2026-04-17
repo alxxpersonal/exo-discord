@@ -47,14 +47,16 @@ With `require_mention = true`, the bot only relays messages that mention or repl
 
 Outbound replies still use the standard MCP tools. Claude calls the existing `reply`, `react`, `edit_message`, `fetch_history`, and `download_attachment` tools over the same MCP stdio session.
 
-Inbound delivery is append-only and audited. `~/.exo-discord/channel-audit.log` records the adapter name, source, timestamp, content hash, and meta keys for every injected channel message. The general runtime audit remains in `~/.exo-discord/audit.log`.
+Inbound delivery is append-only and audited. `~/.exo-discord/channel-audit.log` records the adapter name, source, timestamp, content hash, and meta keys for every injected channel message. The file rotates at 10 MB to `channel-audit.log.1`, keeping the current log plus one prior rotation. The general runtime audit remains in `~/.exo-discord/audit.log`.
+
+Permission relay is a future feature and is not wired in this plugin yet. Leave `channel.claude.permission_relay = false`, which is now the default, until the request or reply handler exists.
 
 ## Development Activation
 
 Install the local bundle:
 
 ```bash
-claude plugin install file:///Users/alxx/Code/Self/exo-discord/plugin/
+claude plugin install file:///path/to/exo-discord/plugin/
 ```
 
 Run Claude Code with the local plugin channel enabled:

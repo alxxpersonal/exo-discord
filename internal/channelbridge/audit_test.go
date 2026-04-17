@@ -111,3 +111,42 @@ func TestAuditWriterAppendReusesExistingFile(t *testing.T) {
 		t.Fatalf("line count = %d, want 2", got)
 	}
 }
+
+func TestAuditWriterAppendRotatesLargeLog(t *testing.T) {
+	t.Parallel()
+
+	writer := NewAuditWriter(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(writer.Path()), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	oversized := strings.Repeat("x", channelAuditMaxSize+1)
+	if err := os.WriteFile(writer.Path(), []byte(oversized), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if err := writer.Append("claude", "discord", "rotated-entry", nil); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	rotatedPath := writer.Path() + ".1"
+	if _, err := os.Stat(rotatedPath); err != nil {
+		t.Fatalf("Stat(%q) error = %v", rotatedPath, err)
+	}
+
+	data, err := os.ReadFile(writer.Path())
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", writer.Path(), err)
+	}
+	if !strings.Contains(string(data), "\"content_sha256\":\"") {
+		t.Fatalf("new audit log = %q, want appended record", string(data))
+	}
+
+	rotatedData, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", rotatedPath, err)
+	}
+	if len(rotatedData) != len(oversized) {
+		t.Fatalf("rotated log size = %d, want %d", len(rotatedData), len(oversized))
+	}
+}

@@ -3,8 +3,11 @@ package cli
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/access"
 	"github.com/alxxpersonal/exo-discord/internal/audit"
@@ -16,6 +19,8 @@ import (
 )
 
 // --- Channel Plugin Command ---
+
+const channelPluginDrainTimeout = 2 * time.Second
 
 func newChannelPluginCommand(env Environment) *cobra.Command {
 	return &cobra.Command{
@@ -39,10 +44,16 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				return err
 			}
 
-			ctx, stop := signal.NotifyContext(env.commandContext(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
+			baseCtx := env.commandContext()
+			signalCtx, stopSignal := signal.NotifyContext(baseCtx, syscall.SIGINT, syscall.SIGTERM)
+			defer stopSignal()
 
-			if err := manager.Open(ctx); err != nil {
+			serverCtx, stopServer := context.WithCancel(baseCtx)
+			defer stopServer()
+			serviceCtx, stopService := context.WithCancel(baseCtx)
+			defer stopService()
+
+			if err := manager.Open(serviceCtx); err != nil {
 				return err
 			}
 			defer func() {
@@ -50,6 +61,7 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				closeWriter(cmd.OutOrStdout())
 			}()
 
+			logger := newLogger(resolved.Config.Logging, cmd.ErrOrStderr())
 			server := mcppkg.NewServerWithOptions(session, manager, mcppkg.Options{
 				Input:  cmd.InOrStdin(),
 				Output: cmd.OutOrStdout(),
@@ -62,52 +74,65 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 
 			serverErr := make(chan error, 1)
 			go func() {
-				serverErr <- server.Run(ctx)
+				serverErr <- server.Run(serverCtx)
 			}()
 
-			if err := server.WaitUntilReady(ctx); err != nil {
-				stop()
+			if err := server.WaitUntilReady(serverCtx); err != nil {
+				stopService()
+				stopServer()
 				return ignoreContextError(err)
 			}
 
 			accessManager, err := access.NewManager(resolved.AccessStatePath, accessPolicyFromConfig(resolved.Config))
 			if err != nil {
-				stop()
+				stopService()
+				stopServer()
 				return err
+			}
+
+			dispatchHook := &channelDispatchHook{
+				dispatch: func(_ context.Context, envelope hook.Envelope) error {
+					event := eventFromEnvelope(envelope)
+					content, meta := channelbridge.BuildClaudeNotificationPayload(event)
+					return server.SendChannelNotification(content, meta)
+				},
 			}
 
 			service := runtimepkg.New(
 				session,
 				accessManager,
-				&channelDispatchHook{
-					dispatch: func(_ context.Context, envelope hook.Envelope) error {
-						event := eventFromEnvelope(envelope)
-						content, meta := channelbridge.BuildClaudeNotificationPayload(event)
-						return server.SendChannelNotification(content, meta)
-					},
-				},
+				dispatchHook,
 				audit.NewLogger(resolved.AuditLogPath),
-				newLogger(resolved.Config.Logging, cmd.ErrOrStderr()),
+				logger,
 				resolved.Config.Hook.Timeout.Duration(),
 				statusRequestFromConfig(resolved.Config.Status),
 			)
 
 			serviceErr := make(chan error, 1)
 			go func() {
-				serviceErr <- service.Run(ctx)
+				serviceErr <- service.Run(serviceCtx)
 			}()
+
+			var shutdownOnce sync.Once
+			shutdown := func() {
+				shutdownOnce.Do(func() {
+					stopService()
+					drainChannelDispatchHook(logger, dispatchHook)
+					stopServer()
+				})
+			}
 
 			select {
 			case err := <-serviceErr:
-				stop()
+				shutdown()
 				<-serverErr
 				return ignoreContextError(err)
 			case err := <-serverErr:
-				stop()
+				shutdown()
 				<-serviceErr
 				return ignoreContextError(err)
-			case <-ctx.Done():
-				stop()
+			case <-signalCtx.Done():
+				shutdown()
 				<-serviceErr
 				<-serverErr
 				return nil
@@ -120,19 +145,86 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 
 type channelDispatchHook struct {
 	dispatch func(context.Context, hook.Envelope) error
+
+	mu       sync.Mutex
+	wg       sync.WaitGroup
+	inflight int64
+	dropped  int64
+	draining bool
 }
 
 func (h *channelDispatchHook) Decide(ctx context.Context, envelope hook.Envelope) (hook.Response, error) {
 	if h.dispatch == nil {
 		return hook.Response{Decision: hook.DecisionSkip}, nil
 	}
+	if !h.start() {
+		return hook.Response{Decision: hook.DecisionSkip}, nil
+	}
+	defer h.finish()
 	if err := h.dispatch(ctx, envelope); err != nil {
 		return hook.Response{}, err
 	}
 	return hook.Response{Decision: hook.DecisionSkip}, nil
 }
 
+func (h *channelDispatchHook) start() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.draining {
+		h.dropped++
+		return false
+	}
+
+	h.inflight++
+	h.wg.Add(1)
+	return true
+}
+
+func (h *channelDispatchHook) finish() {
+	h.mu.Lock()
+	if h.inflight > 0 {
+		h.inflight--
+	}
+	h.mu.Unlock()
+	h.wg.Done()
+}
+
+func (h *channelDispatchHook) Drain(ctx context.Context) int64 {
+	h.mu.Lock()
+	h.draining = true
+	h.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		h.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.inflight + h.dropped
+	case <-done:
+		return 0
+	}
+}
+
 // --- Helpers ---
+
+func drainChannelDispatchHook(logger *slog.Logger, dispatchHook *channelDispatchHook) {
+	if logger == nil || dispatchHook == nil {
+		return
+	}
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), channelPluginDrainTimeout)
+	defer cancel()
+
+	if droppedEvents := dispatchHook.Drain(drainCtx); droppedEvents > 0 {
+		logger.Warn("channel-plugin shutdown drain timed out", "component", "channel-plugin", "dropped_events", droppedEvents)
+	}
+}
 
 func eventFromEnvelope(envelope hook.Envelope) channelbridge.Event {
 	attachments := make([]channelbridge.AttachmentEvent, 0, len(envelope.Message.Attachments))

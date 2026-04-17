@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/alxxpersonal/exo-discord/internal/buildinfo"
 	"github.com/alxxpersonal/exo-discord/internal/channelbridge"
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -68,7 +69,7 @@ func NewServerWithOptions(session discordpkg.Session, manager discordpkg.Manager
 
 	srv.server = sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "exo-discord",
-		Version: "0.1.0",
+		Version: buildinfo.Version,
 	}, &sdkmcp.ServerOptions{
 		Capabilities: buildCapabilities(options.Channel),
 		InitializedHandler: func(context.Context, *sdkmcp.InitializedRequest) {

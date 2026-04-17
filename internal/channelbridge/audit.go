@@ -20,6 +20,7 @@ import (
 const (
 	channelStateDirName = ".exo-discord"
 	channelAuditLogName = "channel-audit.log"
+	channelAuditMaxSize = 10 * 1024 * 1024
 )
 
 // --- Types ---
@@ -69,6 +70,9 @@ func (w *AuditWriter) Append(adapter string, source string, content string, meta
 	defer w.mu.Unlock()
 
 	if err := ensureChannelAuditDir(filepath.Dir(w.path)); err != nil {
+		return err
+	}
+	if err := rotateChannelAuditLog(w.path); err != nil {
 		return err
 	}
 
@@ -161,6 +165,33 @@ func openExistingChannelAuditFile(path string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+func rotateChannelAuditLog(path string) error {
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("stat channel audit log %s: %w", path, err)
+	}
+
+	if info.Size() < channelAuditMaxSize {
+		return nil
+	}
+
+	rotatedPath := path + ".1"
+	if err := os.Remove(rotatedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove rotated channel audit log %s: %w", rotatedPath, err)
+	}
+	if err := os.Rename(path, rotatedPath); err != nil {
+		return fmt.Errorf("rotate channel audit log %s to %s: %w", path, rotatedPath, err)
+	}
+	if err := config.RequireExactFilePerms(rotatedPath, 0o600); err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- Helpers ---

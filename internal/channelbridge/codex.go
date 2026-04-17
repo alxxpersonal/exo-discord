@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alxxpersonal/exo-discord/internal/buildinfo"
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
 	"github.com/gorilla/websocket"
 )
@@ -46,13 +47,18 @@ type CodexAdapter struct {
 	dialContext func(context.Context, string, string) (net.Conn, error)
 	wsDialer    *websocket.Dialer
 
-	mu       sync.Mutex
-	conn     codexConnection
-	pending  map[int64]chan codexResponseMessage
-	turns    map[string]codexMirrorTarget
-	nextID   int64
-	closeCh  chan struct{}
-	closeErr error
+	serviceCtx       context.Context
+	serviceCancel    context.CancelFunc
+	reconnectBackoff []time.Duration
+
+	mu        sync.Mutex
+	conn      codexConnection
+	pending   map[int64]chan codexResponseMessage
+	turns     map[string]codexMirrorTarget
+	nextID    int64
+	closeCh   chan struct{}
+	closeErr  error
+	closeOnce sync.Once
 }
 
 type codexConnection interface {
@@ -179,20 +185,24 @@ func NewCodexAdapter(cfg CodexConfig, hookEnv HookEnv) (*CodexAdapter, error) {
 	if hookEnv.HomeDir == "" {
 		return nil, fmt.Errorf("home dir is required")
 	}
+	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 
 	adapter := &CodexAdapter{
-		transport:       cfg.Transport,
-		socketPath:      cfg.SocketPath,
-		websocketURL:    cfg.WebsocketURL,
-		threadID:        cfg.ThreadID,
-		mirrorResponses: cfg.MirrorResponses,
-		session:         hookEnv.Session,
-		audit:           NewAuditWriter(hookEnv.HomeDir),
-		dialContext:     (&net.Dialer{}).DialContext,
-		wsDialer:        websocket.DefaultDialer,
-		pending:         make(map[int64]chan codexResponseMessage),
-		turns:           make(map[string]codexMirrorTarget),
-		closeCh:         make(chan struct{}),
+		transport:        cfg.Transport,
+		socketPath:       cfg.SocketPath,
+		websocketURL:     cfg.WebsocketURL,
+		threadID:         cfg.ThreadID,
+		mirrorResponses:  cfg.MirrorResponses,
+		session:          hookEnv.Session,
+		audit:            NewAuditWriter(hookEnv.HomeDir),
+		dialContext:      (&net.Dialer{}).DialContext,
+		wsDialer:         websocket.DefaultDialer,
+		serviceCtx:       serviceCtx,
+		serviceCancel:    serviceCancel,
+		reconnectBackoff: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond},
+		pending:          make(map[int64]chan codexResponseMessage),
+		turns:            make(map[string]codexMirrorTarget),
+		closeCh:          make(chan struct{}),
 	}
 	adapter.threadStore = NewCodexThreadStore(hookEnv.HomeDir, adapter)
 
@@ -285,6 +295,15 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 
 // Close closes the adapter transport.
 func (a *CodexAdapter) Close() error {
+	if a.serviceCancel != nil {
+		a.serviceCancel()
+	}
+	a.closeOnce.Do(func() {
+		if a.closeCh != nil {
+			close(a.closeCh)
+		}
+	})
+
 	a.mu.Lock()
 	conn := a.conn
 	a.conn = nil
@@ -327,14 +346,44 @@ func (a *CodexAdapter) ListThreads(ctx context.Context) ([]codexThreadSummary, e
 
 // --- Connection Management ---
 
-func (a *CodexAdapter) ensureConnected(ctx context.Context) (err error) {
-	a.mu.Lock()
-	if a.conn != nil {
-		a.mu.Unlock()
-		return nil
+func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
+	if a.isShuttingDown() {
+		return context.Canceled
 	}
+
+	a.mu.Lock()
+	conn := a.conn
+	closeErr := a.closeErr
 	a.mu.Unlock()
 
+	if conn != nil {
+		return nil
+	}
+	if closeErr == nil {
+		return a.connectAndInitialize(ctx)
+	}
+
+	var lastErr error
+	for _, delay := range a.reconnectBackoff {
+		if err := a.waitForReconnectDelay(ctx, delay); err != nil {
+			return err
+		}
+		lastErr = a.connectAndInitialize(ctx)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = closeErr
+	}
+
+	a.mu.Lock()
+	a.closeErr = lastErr
+	a.mu.Unlock()
+	return lastErr
+}
+
+func (a *CodexAdapter) connectAndInitialize(ctx context.Context) (err error) {
 	conn, err := a.connect(ctx)
 	if err != nil {
 		return err
@@ -347,9 +396,10 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) (err error) {
 		return nil
 	}
 	a.conn = conn
+	a.closeErr = nil
 	a.mu.Unlock()
 
-	go a.readLoop(context.WithoutCancel(ctx))
+	go a.readLoop(a.readLoopContext())
 
 	defer func() {
 		if err == nil {
@@ -367,7 +417,7 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) (err error) {
 		ClientInfo: codexClientInfo{
 			Name:    "exo-discord",
 			Title:   "exo-discord",
-			Version: "0.1.0",
+			Version: buildinfo.Version,
 		},
 		Capabilities: map[string]any{},
 	}, nil); err != nil {
@@ -407,6 +457,50 @@ func (a *CodexAdapter) connect(ctx context.Context) (codexConnection, error) {
 	}
 }
 
+func (a *CodexAdapter) waitForReconnectDelay(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		if a.isShuttingDown() {
+			return context.Canceled
+		}
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-a.closeCh:
+		return context.Canceled
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (a *CodexAdapter) readLoopContext() context.Context {
+	if a.serviceCtx != nil {
+		return a.serviceCtx
+	}
+	return context.Background()
+}
+
+func (a *CodexAdapter) mirrorContext() context.Context {
+	if a.serviceCtx != nil {
+		return a.serviceCtx
+	}
+	return context.Background()
+}
+
+func (a *CodexAdapter) isShuttingDown() bool {
+	select {
+	case <-a.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *CodexAdapter) readLoop(ctx context.Context) {
 	for {
 		a.mu.Lock()
@@ -418,8 +512,12 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 
 		data, err := conn.ReadJSON(ctx)
 		if err != nil {
+			shuttingDown := a.isShuttingDown()
 			a.mu.Lock()
-			if a.closeErr == nil {
+			if a.conn == conn {
+				a.conn = nil
+			}
+			if !shuttingDown {
 				a.closeErr = err
 			}
 			for id, pending := range a.pending {
@@ -427,6 +525,7 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 				pending <- codexResponseMessage{Error: &codexRPCError{Message: err.Error()}}
 			}
 			a.mu.Unlock()
+			_ = conn.Close()
 			return
 		}
 
@@ -506,6 +605,9 @@ func (a *CodexAdapter) handleNotification(notification codexNotificationMessage)
 	if !a.mirrorResponses || a.session == nil {
 		return
 	}
+	if a.isShuttingDown() {
+		return
+	}
 
 	switch notification.Method {
 	case "turn/completed":
@@ -525,7 +627,10 @@ func (a *CodexAdapter) handleNotification(notification codexNotificationMessage)
 		if text == "" {
 			return
 		}
-		_ = replyWithChunks(context.Background(), a.session, target, text)
+		if a.isShuttingDown() {
+			return
+		}
+		_ = replyWithChunks(a.mirrorContext(), a.session, target, text)
 	case "turn/failed":
 		var failed struct {
 			Turn struct {
@@ -718,6 +823,9 @@ func replyWithChunks(ctx context.Context, session discordpkg.Session, target cod
 	if len(chunks) == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if _, err := session.Reply(ctx, discordpkg.ReplyRequest{
 		ChannelID:        target.ChannelID,
@@ -729,6 +837,9 @@ func replyWithChunks(ctx context.Context, session discordpkg.Session, target cod
 	}
 
 	for _, chunk := range chunks[1:] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := session.SendMessage(ctx, discordpkg.SendRequest{
 			ChannelID: target.ChannelID,
 			Text:      chunk,

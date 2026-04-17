@@ -304,7 +304,7 @@ func defaultConfig(homeDir string) Config {
 		},
 		Channel: ChannelConfig{
 			Claude: ChannelClaudeConfig{
-				PermissionRelay: true,
+				PermissionRelay: false,
 			},
 			Codex: ChannelCodexConfig{
 				Transport:       "unix",

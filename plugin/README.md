@@ -3,7 +3,7 @@
 Local development install:
 
 ```bash
-claude plugin install file:///Users/alxx/Code/Self/exo-discord/plugin/
+claude plugin install file:///path/to/exo-discord/plugin/
 ```
 
 Start Claude Code with development channels enabled and activate the local plugin channel:

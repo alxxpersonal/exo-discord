@@ -30,6 +30,15 @@ func TestConfigValidateAcceptsDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigDisablesClaudePermissionRelay(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t.TempDir())
+	if cfg.Channel.Claude.PermissionRelay {
+		t.Fatal("defaultConfig() enables claude permission relay, want false")
+	}
+}
+
 func TestConfigValidateRejectsInvalidHookStdio(t *testing.T) {
 	t.Parallel()
 

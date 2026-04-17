@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alxxpersonal/exo-discord/internal/buildinfo"
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -989,7 +990,7 @@ func connectTestServer(t *testing.T, runtime interface {
 		_ = server.Raw().Run(ctx, serverTransport)
 	}()
 
-	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "0.1.0"}, nil)
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: buildinfo.Version}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
