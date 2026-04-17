@@ -72,3 +72,63 @@ func TestConfigNormalizeDedupe(t *testing.T) {
 		t.Fatalf("AllowedUserIDs = %q, want %q", got, want)
 	}
 }
+
+func TestConfigNormalizeExpandsChannelCodexSocketPath(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig("/tmp/home")
+	cfg.Channel.Codex.SocketPath = "~/.codex/sessions/default/broker.sock"
+
+	cfg.normalize("/tmp/home")
+
+	if got, want := cfg.Channel.Codex.SocketPath, "/tmp/home/.codex/sessions/default/broker.sock"; got != want {
+		t.Fatalf("SocketPath = %q, want %q", got, want)
+	}
+}
+
+func TestConfigValidateRejectsCodexUnixWithoutSocket(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t.TempDir())
+	cfg.Channel.Codex.Transport = "unix"
+	cfg.Channel.Codex.SocketPath = ""
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "socket_path") {
+		t.Fatalf("Validate() error = %v, want socket_path error", err)
+	}
+}
+
+func TestConfigValidateRejectsCodexWebsocketWithoutURL(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t.TempDir())
+	cfg.Channel.Codex.Transport = "ws"
+	cfg.Channel.Codex.WebsocketURL = ""
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "websocket_url") {
+		t.Fatalf("Validate() error = %v, want websocket_url error", err)
+	}
+}
+
+func TestConfigValidateRejectsUnknownChannelTarget(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t.TempDir())
+	cfg.Channel.Enabled = []string{"invalid"}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "unsupported channel target") {
+		t.Fatalf("Validate() error = %v, want channel target error", err)
+	}
+}

@@ -34,6 +34,22 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 				return err
 			}
 
+			if !cmd.Flags().Changed("transport") && resolved.Config.Channel.Codex.Transport != "" {
+				transport = resolved.Config.Channel.Codex.Transport
+			}
+			if !cmd.Flags().Changed("socket") && resolved.Config.Channel.Codex.SocketPath != "" {
+				socketPath = resolved.Config.Channel.Codex.SocketPath
+			}
+			if !cmd.Flags().Changed("websocket-url") && resolved.Config.Channel.Codex.WebsocketURL != "" {
+				websocketURL = resolved.Config.Channel.Codex.WebsocketURL
+			}
+			if !cmd.Flags().Changed("thread") && resolved.Config.Channel.Codex.ThreadID != "" {
+				threadID = resolved.Config.Channel.Codex.ThreadID
+			}
+			if !cmd.Flags().Changed("mirror-responses") {
+				mirrorResponses = resolved.Config.Channel.Codex.MirrorResponses
+			}
+
 			if err := validateCodexBridgeFlags(transport, socketPath, websocketURL); err != nil {
 				return err
 			}

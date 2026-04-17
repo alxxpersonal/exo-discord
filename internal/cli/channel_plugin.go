@@ -55,7 +55,7 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				Output: cmd.OutOrStdout(),
 				Channel: mcppkg.ChannelOptions{
 					Enabled:         true,
-					PermissionRelay: false,
+					PermissionRelay: resolved.Config.Channel.Claude.PermissionRelay,
 				},
 			})
 
