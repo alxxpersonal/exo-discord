@@ -317,6 +317,108 @@ func TestAuthLoginRejectsCallbackWithoutState(t *testing.T) {
 	}
 }
 
+// --- C2: ConsumeState only after successful ExchangeCode ---
+
+func TestAuthLoginExchangeFailurePreservesStateForRetry(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer tokenServer.Close()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, oauthConfigBody(tokenServer.URL))
+
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdin:    strings.NewReader(""),
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		Context:  context.Background,
+		OAuthOverride: oauthEndpointOverride{
+			TokenBase:  tokenServer.URL,
+			RevokeBase: tokenServer.URL,
+		},
+		OAuthStateSeed: "retry-state-seed",
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"auth", "login", "--code", "bad-code", "--state", "retry-state-seed"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil on bad exchange, want failure")
+	}
+	if !strings.Contains(err.Error(), "state preserved for retry") {
+		t.Fatalf("Execute() error = %v, want state-preserved message", err)
+	}
+
+	storage, err := userinstall.NewStorage(filepath.Join(homeDir, ".exo-discord", "oauth"))
+	if err != nil {
+		t.Fatalf("NewStorage() error = %v", err)
+	}
+	if _, err := storage.Load("221"); err == nil {
+		t.Fatal("Load() error = nil after failed exchange, want no token persisted")
+	}
+}
+
+func TestAuthLoginConsumesStateOnlyAfterSuccessfulExchange(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"access-1","token_type":"Bearer","expires_in":604800,"refresh_token":"refresh-1","scope":"identify guilds"}`))
+	}))
+	defer tokenServer.Close()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"221","username":"alxx"}`))
+	}))
+	defer apiServer.Close()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, oauthConfigBody(tokenServer.URL))
+
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdin:    strings.NewReader(""),
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		Context:  context.Background,
+		OAuthOverride: oauthEndpointOverride{
+			TokenBase:  tokenServer.URL,
+			RevokeBase: tokenServer.URL,
+		},
+		OAuthAPIBase:   apiServer.URL,
+		OAuthStateSeed: "consume-after-success",
+	}
+
+	// successful login consumes the state
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"auth", "login", "--code", "ok-code", "--state", "consume-after-success"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// second login with a stolen (unknown) state must be rejected at ConsumeState
+	env2 := env
+	env2.Stdout = &bytes.Buffer{}
+	env2.Stderr = &bytes.Buffer{}
+	cmd2 := NewRootCommand(env2)
+	cmd2.SetArgs([]string{"auth", "login", "--code", "ok-code", "--state", "stolen-state"})
+	err := cmd2.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil on stolen state, want rejection")
+	}
+	if !strings.Contains(err.Error(), "oauth state is unknown or expired") {
+		t.Fatalf("Execute() error = %v, want unknown-state rejection", err)
+	}
+}
+
 // --- Helpers ---
 
 func oauthConfigBody(redirectBase string) string {

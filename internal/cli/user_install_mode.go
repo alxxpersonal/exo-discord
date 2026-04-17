@@ -127,13 +127,12 @@ func newAuthLoginCommand(env Environment) *cobra.Command {
 				return errors.New("callback did not include state")
 			}
 
-			if err := client.ConsumeState(returnedState); err != nil {
-				return err
-			}
-
 			ctx := env.commandContext()
 			token, err := client.ExchangeCode(ctx, code)
 			if err != nil {
+				return fmt.Errorf("exchange oauth code (state preserved for retry): %w", err)
+			}
+			if err := client.ConsumeState(returnedState); err != nil {
 				return err
 			}
 
