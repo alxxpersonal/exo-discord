@@ -115,6 +115,29 @@ func TestCodexThreadStoreLoadThreadRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestCodexThreadStoreLoadThreadTreatsV1FileAsCached(t *testing.T) {
+	t.Parallel()
+
+	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
+	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(store.path, []byte("{\"thread_id\":\"thread-v1\"}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	threadID, origin, ok := store.LoadThread()
+	if !ok {
+		t.Fatal("LoadThread() ok = false, want true")
+	}
+	if threadID != "thread-v1" {
+		t.Fatalf("thread id = %q, want thread-v1", threadID)
+	}
+	if origin != codexThreadOriginCached {
+		t.Fatalf("origin = %q, want %q", origin, codexThreadOriginCached)
+	}
+}
+
 func TestCodexThreadStoreSaveThreadUsesStrictPerms(t *testing.T) {
 	t.Parallel()
 

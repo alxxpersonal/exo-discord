@@ -482,6 +482,144 @@ func TestCodexAdapterFailsGracefullyWhenAutoCreateDisabled(t *testing.T) {
 	<-done
 }
 
+func TestCodexAdapterDeliverSkipsResumeForAutoCreatedThread(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-skip-resume-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+			close(done)
+		}()
+
+		reader := bufio.NewReader(conn)
+		for step := 0; step < 5; step++ {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+
+			method := request["method"].(string)
+			switch step {
+			case 0:
+				if method != "initialize" {
+					t.Errorf("step 0 method = %q, want initialize", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{})
+			case 1:
+				if method != "initialized" {
+					t.Errorf("step 1 method = %q, want initialized", method)
+					return
+				}
+			case 2:
+				if method != "turn/start" {
+					t.Errorf("step 2 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-auto" {
+					t.Errorf("step 2 threadId = %#v, want thread-auto", params["threadId"])
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 3:
+				if method != "thread/list" {
+					t.Errorf("step 3 method = %q, want thread/list", method)
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"data": []map[string]any{
+						{
+							"id":        "thread-live",
+							"updatedAt": 2,
+							"status": map[string]any{
+								"type": "active",
+							},
+						},
+					},
+				})
+			case 4:
+				if method != "turn/start" {
+					t.Errorf("step 4 method = %q, want turn/start", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-live" {
+					t.Errorf("step 4 threadId = %#v, want thread-live", params["threadId"])
+					return
+				}
+				writeUnixResponse(conn, request["id"], map[string]any{
+					"turn": map[string]any{"id": "turn-live"},
+				})
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:  codexTransportUnix,
+		SocketPath: socketPath,
+		ThreadID:   "thread-auto",
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	adapter.threadOrigin = codexThreadOriginAutoCreated
+
+	err = adapter.Deliver(context.Background(), Event{
+		Source: "discord",
+		Message: MessageEvent{
+			ID:             "msg-1",
+			ChannelID:      "chan-1",
+			AuthorID:       "user-1",
+			AuthorUsername: "alice",
+			Content:        "hello",
+			Timestamp:      time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	if adapter.threadID != "thread-live" {
+		t.Fatalf("adapter threadID = %q, want thread-live", adapter.threadID)
+	}
+	if adapter.threadOrigin != codexThreadOriginCached {
+		t.Fatalf("adapter threadOrigin = %q, want %q", adapter.threadOrigin, codexThreadOriginCached)
+	}
+	saved, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok || saved != "thread-live" {
+		t.Fatalf("cache thread = %q, %t, want thread-live, true", saved, ok)
+	}
+	if savedOrigin != codexThreadOriginCached {
+		t.Fatalf("cache origin = %q, want %q", savedOrigin, codexThreadOriginCached)
+	}
+
+	<-done
+}
+
 func TestCodexAdapterPersistsAutoCreatedThreadToCache(t *testing.T) {
 	t.Parallel()
 

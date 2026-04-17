@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -941,7 +942,7 @@ func TestIsThreadNotFoundError(t *testing.T) {
 	}
 }
 
-func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
+func TestCodexAdapterDeliverRetriesV1SavedThreadAndMirrorsResponse(t *testing.T) {
 	t.Parallel()
 
 	socketPath := "/tmp/exo-discord-retry-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".sock"
@@ -967,7 +968,7 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 		}()
 
 		reader := bufio.NewReader(conn)
-		for step := 0; step < 5; step++ {
+		for step := 0; step < 6; step++ {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				return
@@ -998,8 +999,19 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 				}
 				writeUnixError(conn, request["id"], "thread not found")
 			case 3:
+				if method != "thread/resume" {
+					t.Errorf("step 3 method = %q, want thread/resume", method)
+					return
+				}
+				params := request["params"].(map[string]any)
+				if params["threadId"] != "thread-stale" {
+					t.Errorf("step 3 threadId = %#v, want thread-stale", params["threadId"])
+					return
+				}
+				writeUnixError(conn, request["id"], "thread not found")
+			case 4:
 				if method != "thread/list" {
-					t.Errorf("step 3 method = %q, want thread/list", method)
+					t.Errorf("step 4 method = %q, want thread/list", method)
 					return
 				}
 				writeUnixResponse(conn, request["id"], map[string]any{
@@ -1013,9 +1025,9 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 						},
 					},
 				})
-			case 4:
+			case 5:
 				if method != "turn/start" {
-					t.Errorf("step 4 method = %q, want turn/start", method)
+					t.Errorf("step 5 method = %q, want turn/start", method)
 					return
 				}
 				params := request["params"].(map[string]any)
@@ -1062,8 +1074,21 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCodexAdapter() error = %v", err)
 	}
-	if err := adapter.threadStore.SaveThread("thread-stale", codexThreadOriginCached); err != nil {
-		t.Fatalf("SaveThread() error = %v", err)
+	if err := os.MkdirAll(filepath.Dir(adapter.threadStore.path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(adapter.threadStore.path, []byte("{\"thread_id\":\"thread-stale\"}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	savedID, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok {
+		t.Fatal("LoadThread() ok = false, want true")
+	}
+	if savedID != "thread-stale" {
+		t.Fatalf("saved thread id = %q, want thread-stale", savedID)
+	}
+	if savedOrigin != codexThreadOriginCached {
+		t.Fatalf("saved origin = %q, want %q", savedOrigin, codexThreadOriginCached)
 	}
 
 	err = adapter.Deliver(context.Background(), Event{

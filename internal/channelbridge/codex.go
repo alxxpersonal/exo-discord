@@ -292,7 +292,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 		return err
 	}
 
-	threadID, explicit, origin, err := a.resolveThreadID(ctx)
+	threadID, _, origin, err := a.resolveThreadID(ctx)
 	if err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 	formatted := formatCodexInput(event)
 	started, startErr := a.startTurn(ctx, threadID, formatted)
 	if startErr != nil && isThreadNotFoundError(startErr) {
-		recovered, recoverErr := a.recoverThreadSingleflight(ctx, threadID, explicit, origin)
+		recovered, recoverErr := a.recoverThreadSingleflight(ctx, threadID, origin)
 		if recoverErr != nil {
 			a.auditDelivery(event, originalThreadID, "", "error", recovered.fallbackPath, recoverErr.Error())
 			return recoverErr
@@ -813,7 +813,7 @@ func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, codex
 // On success the adapter state is updated inside the singleflight callback
 // (threadID, threadOrigin, cache file) so the waiting callers see a coherent
 // view.
-func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedThreadID string, explicit bool, origin codexThreadOrigin) (codexRecoverResult, error) {
+func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedThreadID string, origin codexThreadOrigin) (codexRecoverResult, error) {
 	value, err, _ := a.recoverGroup.Do(codexRecoverSingleflightKey, func() (any, error) {
 		// re-check the in-memory thread id under the mutex: a prior winner
 		// of this singleflight slot may already have recovered and advanced
@@ -831,7 +831,7 @@ func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedT
 			}, nil
 		}
 
-		recoveredID, recoveredPath, recoveredOrigin, recoverErr := a.recoverThread(ctx, requestedThreadID, explicit, origin)
+		recoveredID, recoveredPath, recoveredOrigin, recoverErr := a.recoverThread(ctx, requestedThreadID, origin)
 		if recoverErr != nil {
 			return codexRecoverResult{fallbackPath: recoveredPath}, recoverErr
 		}
@@ -861,18 +861,17 @@ func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedT
 }
 
 // recoverThread runs the fallback chain after a thread-not-found on
-// turn/start: it attempts thread/resume (only when the id could plausibly
-// exist on disk), then thread/list discovery, then thread/start auto-create
-// (if enabled), then returns the recovered id so the caller can retry
-// turn/start with it. Returns the new thread id, a label identifying which
-// fallback path succeeded, and the origin describing where the recovered
-// id came from.
-func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID string, explicit bool, origin codexThreadOrigin) (string, string, codexThreadOrigin, error) {
-	// try thread/resume first when the caller supplied an explicit id that
-	// could plausibly exist in $CODEX_HOME/rollouts. ids minted by a prior
-	// thread/start on this app-server (autoCreated) never have a rollout,
-	// so resume would always fail with thread not found and waste an rpc.
-	if explicit && requestedThreadID != "" && origin != codexThreadOriginAutoCreated {
+// turn/start: it attempts thread/resume for configured and cached ids,
+// then thread/list discovery, then thread/start auto-create (if enabled),
+// then returns the recovered id so the caller can retry turn/start with it.
+// Returns the new thread id, a label identifying which fallback path
+// succeeded, and the origin describing where the recovered id came from.
+func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID string, origin codexThreadOrigin) (string, string, codexThreadOrigin, error) {
+	// try thread/resume first for ids that could plausibly exist in
+	// $CODEX_HOME/rollouts. ids minted by a prior thread/start on this
+	// app-server (auto_created) never have a rollout, so resume would always
+	// fail with thread not found and waste an rpc.
+	if requestedThreadID != "" && origin != codexThreadOriginAutoCreated {
 		resumedID, resumeErr := a.resumeThread(ctx, requestedThreadID)
 		if resumeErr == nil && resumedID != "" {
 			return resumedID, "resume", codexThreadOriginConfigured, nil
