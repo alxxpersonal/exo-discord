@@ -54,10 +54,11 @@ type TokenResponse struct {
 
 // OAuthClient performs Discord OAuth 2.0 authorization code exchange and refresh.
 type OAuthClient struct {
-	cfg    OAuthConfig
-	http   *http.Client
-	states *stateStore
-	clock  func() time.Time
+	cfg       OAuthConfig
+	http      *http.Client
+	states    *stateStore
+	clock     func() time.Time
+	stateFunc func() (string, error)
 }
 
 // --- Constructors ---
@@ -68,11 +69,17 @@ func NewOAuthClient(cfg OAuthConfig, httpClient *http.Client) *OAuthClient {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &OAuthClient{
-		cfg:    cfg,
-		http:   httpClient,
-		states: newStateStore(10 * time.Minute),
-		clock:  time.Now,
+		cfg:       cfg,
+		http:      httpClient,
+		states:    newStateStore(10 * time.Minute),
+		clock:     time.Now,
+		stateFunc: generateState,
 	}
+}
+
+// SetStateGenerator overrides the csrf state generator. Intended for tests.
+func (c *OAuthClient) SetStateGenerator(fn func() (string, error)) {
+	c.stateFunc = fn
 }
 
 // --- Authorization URL ---
@@ -89,7 +96,11 @@ func (c *OAuthClient) AuthorizationURL() (string, string, error) {
 		return "", "", fmt.Errorf("oauth scopes must not be empty")
 	}
 
-	state, err := generateState()
+	gen := c.stateFunc
+	if gen == nil {
+		gen = generateState
+	}
+	state, err := gen()
 	if err != nil {
 		return "", "", err
 	}

@@ -33,6 +33,8 @@ type Environment struct {
 	BotModeRunner  botModeRunner
 	OAuthOverride  oauthEndpointOverride
 	OAuthAPIBase   string
+	// OAuthStateSeed is an optional test hook to force a deterministic oauth state.
+	OAuthStateSeed string
 }
 
 // oauthEndpointOverride lets tests redirect Discord oauth endpoints to a local server.

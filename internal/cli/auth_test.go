@@ -47,11 +47,12 @@ func TestAuthLoginExchangesCodeAndPersistsToken(t *testing.T) {
 			TokenBase:  tokenServer.URL,
 			RevokeBase: tokenServer.URL,
 		},
-		OAuthAPIBase: apiServer.URL,
+		OAuthAPIBase:   apiServer.URL,
+		OAuthStateSeed: "state-seed-1",
 	}
 
 	cmd := NewRootCommand(env)
-	cmd.SetArgs([]string{"auth", "login", "--code", "test-code"})
+	cmd.SetArgs([]string{"auth", "login", "--code", "test-code", "--state", "state-seed-1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v\nstderr=%s", err, stderr.String())
 	}
@@ -283,6 +284,36 @@ func TestRequireOAuthConfigValidates(t *testing.T) {
 	}
 	if len(cfg.Scopes) == 0 {
 		t.Fatalf("cfg.Scopes = nil, want default scopes")
+	}
+}
+
+// --- C1: Missing State Rejected ---
+
+func TestAuthLoginRejectsCallbackWithoutState(t *testing.T) {
+	t.Parallel()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, oauthConfigBody("http://x"))
+
+	// stdin provides only a bare code, no state
+	env := Environment{
+		StartDir:       startDir,
+		HomeDir:        homeDir,
+		Stdin:          strings.NewReader("just-a-code\n"),
+		Stdout:         &bytes.Buffer{},
+		Stderr:         &bytes.Buffer{},
+		Context:        context.Background,
+		OAuthStateSeed: "state-seed-x",
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"auth", "login"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want state-missing rejection")
+	}
+	if !strings.Contains(err.Error(), "callback did not include state") {
+		t.Fatalf("Execute() error = %v, want callback-did-not-include-state", err)
 	}
 }
 

@@ -96,6 +96,9 @@ func newAuthLoginCommand(env Environment) *cobra.Command {
 			applyOAuthOverride(&oauthCfg, env.OAuthOverride)
 
 			client := userinstall.NewOAuthClient(oauthCfg, &http.Client{Timeout: 30 * time.Second})
+			if seed := strings.TrimSpace(env.OAuthStateSeed); seed != "" {
+				client.SetStateGenerator(func() (string, error) { return seed, nil })
+			}
 			authURL, state, err := client.AuthorizationURL()
 			if err != nil {
 				return err
@@ -114,17 +117,14 @@ func newAuthLoginCommand(env Environment) *cobra.Command {
 
 			code := strings.TrimSpace(codeFlag)
 			returnedState := strings.TrimSpace(stateFlag)
-			if returnedState == "" {
-				returnedState = state
-			}
 			if code == "" {
 				code, returnedState, err = readCallbackFromReader(cmd.InOrStdin(), cmd.ErrOrStderr())
 				if err != nil {
 					return err
 				}
-				if returnedState == "" {
-					returnedState = state
-				}
+			}
+			if returnedState == "" {
+				return errors.New("callback did not include state")
 			}
 
 			if err := client.ConsumeState(returnedState); err != nil {
