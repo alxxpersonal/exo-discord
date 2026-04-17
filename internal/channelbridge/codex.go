@@ -19,6 +19,7 @@ import (
 	"github.com/alxxpersonal/exo-discord/internal/buildinfo"
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
 	"github.com/gorilla/websocket"
+	"golang.org/x/sync/singleflight"
 )
 
 // --- Constants ---
@@ -28,6 +29,8 @@ const (
 
 	codexTransportUnix = "unix"
 	codexTransportWS   = "ws"
+
+	codexRecoverSingleflightKey = "recover"
 )
 
 // --- Types ---
@@ -52,14 +55,23 @@ type CodexAdapter struct {
 	serviceCancel    context.CancelFunc
 	reconnectBackoff []time.Duration
 
-	mu        sync.Mutex
-	conn      codexConnection
-	pending   map[int64]chan codexResponseMessage
-	turns     map[string]codexMirrorTarget
-	nextID    int64
-	closeCh   chan struct{}
-	closeErr  error
-	closeOnce sync.Once
+	mu           sync.Mutex
+	conn         codexConnection
+	pending      map[int64]chan codexResponseMessage
+	turns        map[string]codexMirrorTarget
+	nextID       int64
+	closeCh      chan struct{}
+	closeErr     error
+	closeOnce    sync.Once
+	recoverGroup singleflight.Group
+}
+
+// codexRecoverResult is the value returned by the singleflight recovery
+// group. It carries both the recovered thread id and the label describing
+// which fallback path produced it so concurrent callers share the outcome.
+type codexRecoverResult struct {
+	threadID     string
+	fallbackPath string
 }
 
 type codexConnection interface {
@@ -265,27 +277,18 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 	formatted := formatCodexInput(event)
 	started, startErr := a.startTurn(ctx, threadID, formatted)
 	if startErr != nil && isThreadNotFoundError(startErr) {
-		recoveredThreadID, recoveredPath, recoverErr := a.recoverThread(ctx, threadID, explicit)
+		recovered, recoverErr := a.recoverThreadSingleflight(ctx, threadID, explicit)
 		if recoverErr != nil {
-			a.auditDelivery(event, originalThreadID, "", "error", recoveredPath, recoverErr.Error())
+			a.auditDelivery(event, originalThreadID, "", "error", recovered.fallbackPath, recoverErr.Error())
 			return recoverErr
 		}
-		fallbackPath = recoveredPath
+		fallbackPath = recovered.fallbackPath
 		slog.Warn("codex thread not found, recovered via fallback",
 			"original_thread_id", originalThreadID,
-			"recovered_thread_id", recoveredThreadID,
+			"recovered_thread_id", recovered.threadID,
 			"fallback_path", fallbackPath,
 		)
-		if explicit {
-			a.mu.Lock()
-			a.threadID = recoveredThreadID
-			a.mu.Unlock()
-		}
-		threadID = recoveredThreadID
-		if saveErr := a.threadStore.SaveThread(threadID); saveErr != nil {
-			a.auditDelivery(event, originalThreadID, threadID, "error", fallbackPath, saveErr.Error())
-			return fmt.Errorf("save recovered codex thread: %w", saveErr)
-		}
+		threadID = recovered.threadID
 		started, startErr = a.startTurn(ctx, threadID, formatted)
 	}
 	if startErr != nil {
@@ -766,6 +769,59 @@ func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, error
 		return "", false, err
 	}
 	return id, false, nil
+}
+
+// recoverThreadSingleflight serializes concurrent recovery attempts for the
+// same adapter so two simultaneous Deliver calls that both observe a
+// thread-not-found on turn/start share a single recovery result and emit
+// exactly one thread/start on the wire. Without this, each caller would race
+// to create a fresh thread and orphan the losing ones on the app-server.
+//
+// On success the adapter state is updated inside the singleflight callback
+// (threadID, cache file) so the waiting callers see a coherent view.
+func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedThreadID string, explicit bool) (codexRecoverResult, error) {
+	value, err, _ := a.recoverGroup.Do(codexRecoverSingleflightKey, func() (any, error) {
+		// re-check the in-memory thread id under the mutex: a prior winner
+		// of this singleflight slot may already have recovered and advanced
+		// a.threadID past the caller's stale requestedThreadID. if so, the
+		// new id is the recovery result and no extra rpc is needed.
+		a.mu.Lock()
+		currentID := a.threadID
+		a.mu.Unlock()
+		if currentID != "" && currentID != requestedThreadID {
+			return codexRecoverResult{
+				threadID:     currentID,
+				fallbackPath: "cached",
+			}, nil
+		}
+
+		recoveredID, recoveredPath, recoverErr := a.recoverThread(ctx, requestedThreadID, explicit)
+		if recoverErr != nil {
+			return codexRecoverResult{fallbackPath: recoveredPath}, recoverErr
+		}
+
+		if explicit {
+			a.mu.Lock()
+			a.threadID = recoveredID
+			a.mu.Unlock()
+		}
+
+		if saveErr := a.threadStore.SaveThread(recoveredID); saveErr != nil {
+			return codexRecoverResult{fallbackPath: recoveredPath}, fmt.Errorf("save recovered codex thread: %w", saveErr)
+		}
+
+		return codexRecoverResult{
+			threadID:     recoveredID,
+			fallbackPath: recoveredPath,
+		}, nil
+	})
+	if err != nil {
+		if result, ok := value.(codexRecoverResult); ok {
+			return result, err
+		}
+		return codexRecoverResult{fallbackPath: "error"}, err
+	}
+	return value.(codexRecoverResult), nil
 }
 
 // recoverThread attempts to recover from a thread-not-found error by

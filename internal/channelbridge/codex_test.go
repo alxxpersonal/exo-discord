@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -615,4 +617,205 @@ func TestCodexAdapterPersistsAutoCreatedThreadToCache(t *testing.T) {
 	}
 
 	<-done
+}
+
+// TestCodexAdapterConcurrentDeliverySerializesRecovery pins C1: three
+// concurrent inbound Deliver calls that all observe thread-not-found on
+// turn/start must share a single recovery pass. Exactly one thread/start
+// must hit the wire, all three Delivers must succeed, and they must all
+// converge on the same recovered thread id. Without the singleflight-gated
+// recovery path, each caller would race to mint its own thread and leave
+// orphans on the app-server.
+func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), "exo-discord-concur-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+
+	const concurrentDelivers = 3
+
+	var (
+		writeMu             sync.Mutex
+		threadStartCalls    atomic.Int32
+		threadResumeCalls   atomic.Int32
+		staleTurnStartCalls atomic.Int32
+		staleTurnStartReady = make(chan struct{}, concurrentDelivers)
+		releaseStaleTurns   = make(chan struct{})
+	)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		reader := bufio.NewReader(conn)
+		writeResponse := func(id any, result any) {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			writeUnixResponse(conn, id, result)
+		}
+		writeError := func(id any, message string) {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			writeUnixError(conn, id, message)
+		}
+
+		for {
+			line, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				return
+			}
+			var request map[string]any
+			if err := json.Unmarshal(line, &request); err != nil {
+				t.Errorf("Unmarshal() error = %v", err)
+				return
+			}
+			method, _ := request["method"].(string)
+			id := request["id"]
+
+			switch method {
+			case "initialize":
+				writeResponse(id, map[string]any{})
+			case "initialized":
+				// notification, no reply
+			case "turn/start":
+				params, _ := request["params"].(map[string]any)
+				threadID, _ := params["threadId"].(string)
+				switch threadID {
+				case "thread-stale":
+					// hold every stale turn/start until all concurrent callers
+					// have hit this branch, then release them together so the
+					// recovery path is entered concurrently by all three.
+					staleTurnStartCalls.Add(1)
+					go func(requestID any) {
+						staleTurnStartReady <- struct{}{}
+						<-releaseStaleTurns
+						writeError(requestID, "thread not found")
+					}(id)
+				case "thread-recovered":
+					writeResponse(id, map[string]any{
+						"turn": map[string]any{"id": "turn-" + strconv.FormatInt(time.Now().UnixNano(), 10)},
+					})
+				default:
+					t.Errorf("unexpected turn/start threadId = %q", threadID)
+					writeError(id, "unexpected thread id")
+				}
+			case "thread/resume":
+				threadResumeCalls.Add(1)
+				writeError(id, "thread not found")
+			case "thread/start":
+				if threadStartCalls.Add(1) > 1 {
+					t.Errorf("thread/start called more than once, want singleflight-gated")
+				}
+				writeResponse(id, map[string]any{
+					"thread": map[string]any{"id": "thread-recovered"},
+				})
+			default:
+				t.Errorf("unexpected method %q", method)
+				writeError(id, "unexpected method")
+			}
+		}
+	}()
+
+	homeDir := t.TempDir()
+	adapter, err := NewCodexAdapter(CodexConfig{
+		Transport:        codexTransportUnix,
+		SocketPath:       socketPath,
+		ThreadID:         "thread-stale",
+		AutoCreateThread: true,
+	}, HookEnv{HomeDir: homeDir})
+	if err != nil {
+		t.Fatalf("NewCodexAdapter() error = %v", err)
+	}
+	// force the discovery path to fail so recovery lands on auto-create and
+	// emits a thread/start we can count reliably.
+	adapter.threadStore = NewCodexThreadStore(homeDir, fakeThreadProvider{
+		err: errors.New("no codex threads were returned by thread/list"),
+	})
+
+	// release the stale turn/start responses once all concurrent callers
+	// have sent their initial turn/start request.
+	go func() {
+		for i := 0; i < concurrentDelivers; i++ {
+			select {
+			case <-staleTurnStartReady:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for stale turn/start #%d", i+1)
+				close(releaseStaleTurns)
+				return
+			}
+		}
+		close(releaseStaleTurns)
+	}()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, concurrentDelivers)
+	for i := 0; i < concurrentDelivers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			errCh <- adapter.Deliver(context.Background(), Event{
+				Source: "discord",
+				Message: MessageEvent{
+					ID:             "msg-" + strconv.Itoa(index),
+					ChannelID:      "chan-1",
+					AuthorID:       "user-1",
+					AuthorUsername: "alice",
+					Content:        "hello " + strconv.Itoa(index),
+					Timestamp:      time.Now().UTC(),
+				},
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for deliverErr := range errCh {
+		if deliverErr != nil {
+			t.Fatalf("Deliver() error = %v", deliverErr)
+		}
+	}
+
+	if got := threadStartCalls.Load(); got != 1 {
+		t.Fatalf("thread/start calls = %d, want exactly 1", got)
+	}
+	if got := staleTurnStartCalls.Load(); got != concurrentDelivers {
+		t.Fatalf("stale turn/start calls = %d, want %d", got, concurrentDelivers)
+	}
+	if got := threadResumeCalls.Load(); got > 1 {
+		t.Fatalf("thread/resume calls = %d, want at most 1", got)
+	}
+
+	adapter.mu.Lock()
+	finalID := adapter.threadID
+	adapter.mu.Unlock()
+	if finalID != "thread-recovered" {
+		t.Fatalf("adapter threadID = %q, want thread-recovered", finalID)
+	}
+
+	saved, ok := adapter.threadStore.LoadThread()
+	if !ok || saved != "thread-recovered" {
+		t.Fatalf("cache thread = %q, %t, want thread-recovered, true", saved, ok)
+	}
+
+	_ = adapter.Close()
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mock server did not shut down")
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/config"
@@ -37,6 +38,7 @@ type CodexThreadStore struct {
 	path     string
 	provider threadListProvider
 	now      func() time.Time
+	writeMu  sync.Mutex
 }
 
 // --- Constructors ---
@@ -86,6 +88,9 @@ func (s *CodexThreadStore) SaveThread(id string) error {
 	if id == "" {
 		return fmt.Errorf("codex thread id must not be empty")
 	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	if err := ensureChannelAuditDir(filepath.Dir(s.path)); err != nil {
 		return err
