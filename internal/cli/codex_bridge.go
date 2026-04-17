@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/access"
 	"github.com/alxxpersonal/exo-discord/internal/audit"
@@ -23,6 +24,7 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 		websocketURL       string
 		threadID           string
 		mirrorResponses    bool
+		mirrorFlushTimeout time.Duration
 		autoCreateThread   bool
 		noAutoCreateThread bool
 	)
@@ -51,6 +53,7 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 			if !cmd.Flags().Changed("mirror-responses") {
 				mirrorResponses = resolved.Config.Channel.Codex.MirrorResponses
 			}
+			mirrorFlushTimeout = resolved.Config.Channel.Codex.MirrorFlushTimeout.Duration()
 			if !cmd.Flags().Changed("auto-create-thread") {
 				autoCreateThread = resolved.Config.Channel.Codex.AutoCreateThread
 			}
@@ -70,12 +73,13 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 			adapter, err := env.NewChannelAdapter(channelbridge.Config{
 				Enabled: []string{"codex"},
 				Codex: channelbridge.CodexConfig{
-					Transport:        transport,
-					SocketPath:       socketPath,
-					WebsocketURL:     websocketURL,
-					ThreadID:         threadID,
-					MirrorResponses:  mirrorResponses,
-					AutoCreateThread: autoCreateThread,
+					Transport:          transport,
+					SocketPath:         socketPath,
+					WebsocketURL:       websocketURL,
+					ThreadID:           threadID,
+					MirrorResponses:    mirrorResponses,
+					MirrorFlushTimeout: mirrorFlushTimeout,
+					AutoCreateThread:   autoCreateThread,
 				},
 			}, channelbridge.HookEnv{
 				HomeDir: env.HomeDir,

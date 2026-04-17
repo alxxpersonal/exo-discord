@@ -231,6 +231,71 @@ func (s *writeTriggeredCodexConnection) WriteJSON(ctx context.Context, payload [
 	return nil
 }
 
+type fakeTimerClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	clock    *fakeTimerClock
+	deadline time.Time
+	callback func()
+	active   bool
+}
+
+func newFakeTimerClock(now time.Time) *fakeTimerClock {
+	return &fakeTimerClock{now: now}
+}
+
+func (c *fakeTimerClock) AfterFunc(delay time.Duration, callback func()) codexTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	timer := &fakeTimer{
+		clock:    c,
+		deadline: c.now.Add(delay),
+		callback: callback,
+		active:   true,
+	}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (c *fakeTimerClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeTimerClock) Advance(delay time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(delay)
+	callbacks := make([]func(), 0)
+	for _, timer := range c.timers {
+		if !timer.active || timer.deadline.After(c.now) {
+			continue
+		}
+		timer.active = false
+		callbacks = append(callbacks, timer.callback)
+	}
+	c.mu.Unlock()
+
+	for _, callback := range callbacks {
+		callback()
+	}
+}
+
+func (t *fakeTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	if !t.active {
+		return false
+	}
+	t.active = false
+	return true
+}
+
 // --- Test Cases ---
 
 func TestMultiAdapterDeliverAndClose(t *testing.T) {
@@ -679,7 +744,7 @@ func TestCodexAdapterWaitForReconnectDelayReturnsCanceledWhenClosed(t *testing.T
 	if err := adapter.waitForReconnectDelay(context.Background(), 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForReconnectDelay(0) error = %v, want context.Canceled", err)
 	}
-	if err := adapter.waitForReconnectDelay(context.Background(), time.Millisecond); !errors.Is(err, context.Canceled) {
+	if err := adapter.waitForReconnectDelay(context.Background(), time.Hour); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForReconnectDelay(timer) error = %v, want context.Canceled", err)
 	}
 }
@@ -2117,11 +2182,178 @@ func TestCodexAdapterMirrorFallsBackToLastBufferedMessageWithoutPhase(t *testing
 	}
 }
 
+func TestCodexAdapterForcesMirrorFlushWhenTurnCompletedMissing(t *testing.T) {
+	t.Parallel()
+
+	homeDir := t.TempDir()
+	clock := newFakeTimerClock(time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC))
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses:    true,
+		mirrorFlushTimeout: 30 * time.Second,
+		mirrorClock:        clock,
+		session:            session,
+		audit:              NewAuditWriter(homeDir),
+		turns: map[string]codexMirrorTarget{
+			"turn-timeout": {ChannelID: "chan-1", MessageID: "msg-in"},
+		},
+	}
+
+	itemPayload, err := json.Marshal(codexItemCompletedNotification{
+		ThreadID: "thread-timeout",
+		TurnID:   "turn-timeout",
+		Item: codexThreadItem{
+			Type:  "agentMessage",
+			ID:    "item-timeout",
+			Text:  "forced timeout reply",
+			Phase: "final_answer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(item) error = %v", err)
+	}
+
+	adapter.handleItemCompleted(itemPayload)
+	if got := session.replyCount(); got != 0 {
+		t.Fatalf("reply count before timeout = %d, want 0", got)
+	}
+
+	clock.Advance(29 * time.Second)
+	if got := session.replyCount(); got != 0 {
+		t.Fatalf("reply count before expiry = %d, want 0", got)
+	}
+
+	clock.Advance(time.Second)
+	adapter.mirrorWG.Wait()
+
+	if got := session.replyCount(); got != 1 {
+		t.Fatalf("reply count after timeout = %d, want 1", got)
+	}
+	if got := session.firstReply().Text; got != "forced timeout reply" {
+		t.Fatalf("reply text = %q, want forced timeout reply", got)
+	}
+
+	auditPath := filepath.Join(homeDir, ".exo-discord", "channel-audit.log")
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("ReadFile(channel audit) error = %v", err)
+	}
+	output := string(data)
+	if !strings.Contains(output, "\"source\":\"codex_mirror_timeout\"") {
+		t.Fatalf("audit log = %q, want codex_mirror_timeout source", output)
+	}
+	for _, key := range []string{"buffered_char_count", "elapsed", "event", "reason", "turn_id"} {
+		if !strings.Contains(output, key) {
+			t.Fatalf("audit log = %q, want meta key %q", output, key)
+		}
+	}
+}
+
+func TestCodexAdapterNormalCompletionCancelsTimeout(t *testing.T) {
+	t.Parallel()
+
+	clock := newFakeTimerClock(time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC))
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses:    true,
+		mirrorFlushTimeout: 30 * time.Second,
+		mirrorClock:        clock,
+		session:            session,
+		turns: map[string]codexMirrorTarget{
+			"turn-complete": {ChannelID: "chan-1", MessageID: "msg-in"},
+		},
+	}
+
+	itemPayload, err := json.Marshal(codexItemCompletedNotification{
+		ThreadID: "thread-complete",
+		TurnID:   "turn-complete",
+		Item: codexThreadItem{
+			Type: "agentMessage",
+			ID:   "item-complete",
+			Text: "normal completion reply",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(item) error = %v", err)
+	}
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-complete",
+		Turn:     codexTurn{ID: "turn-complete"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+
+	adapter.handleItemCompleted(itemPayload)
+	adapter.handleTurnCompleted(json.RawMessage(turnPayload))
+	adapter.mirrorWG.Wait()
+
+	if got := session.replyCount(); got != 1 {
+		t.Fatalf("reply count after turn/completed = %d, want 1", got)
+	}
+
+	clock.Advance(30 * time.Second)
+	adapter.mirrorWG.Wait()
+
+	if got := session.replyCount(); got != 1 {
+		t.Fatalf("reply count after timer advance = %d, want 1", got)
+	}
+}
+
+func TestCodexAdapterDisconnectCancelsMirrorTimer(t *testing.T) {
+	t.Parallel()
+
+	homeDir := t.TempDir()
+	clock := newFakeTimerClock(time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC))
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		conn:               &scriptedCodexConnection{},
+		mirrorResponses:    true,
+		mirrorFlushTimeout: 30 * time.Second,
+		mirrorClock:        clock,
+		session:            session,
+		audit:              NewAuditWriter(homeDir),
+		pending:            make(map[int64]chan codexResponseMessage),
+		pendingMirrors:     make(map[int64]codexMirrorTarget),
+		turns: map[string]codexMirrorTarget{
+			"turn-disconnect": {ChannelID: "chan-1", MessageID: "msg-in"},
+		},
+		closeCh: make(chan struct{}),
+	}
+
+	itemPayload, err := json.Marshal(codexItemCompletedNotification{
+		ThreadID: "thread-disconnect",
+		TurnID:   "turn-disconnect",
+		Item: codexThreadItem{
+			Type: "agentMessage",
+			ID:   "item-disconnect",
+			Text: "lost on disconnect",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(item) error = %v", err)
+	}
+
+	adapter.handleItemCompleted(itemPayload)
+	adapter.readLoop(context.Background())
+
+	clock.Advance(30 * time.Second)
+	adapter.mirrorWG.Wait()
+
+	if got := session.replyCount(); got != 0 {
+		t.Fatalf("reply count after disconnect = %d, want 0", got)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".exo-discord", "channel-audit.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("channel audit err = %v, want not exist", err)
+	}
+}
+
 func TestCodexAdapterReadLoopClearsMirrorStateOnDisconnect(t *testing.T) {
 	t.Parallel()
 
 	responseCh1 := make(chan codexResponseMessage, 1)
 	responseCh2 := make(chan codexResponseMessage, 1)
+	clock := newFakeTimerClock(time.Date(2026, 4, 18, 9, 0, 0, 0, time.UTC))
 	adapter := &CodexAdapter{
 		conn: &scriptedCodexConnection{},
 		pending: map[int64]chan codexResponseMessage{
@@ -2139,6 +2371,14 @@ func TestCodexAdapterReadLoopClearsMirrorStateOnDisconnect(t *testing.T) {
 			"turn-1": {{Type: "agentMessage", Text: "one"}},
 			"turn-2": {{Type: "agentMessage", Text: "two"}},
 		},
+		turnThreadIDs: map[string]string{
+			"turn-1": "thread-1",
+			"turn-2": "thread-2",
+		},
+		turnTimers: map[string]codexMirrorTimerState{
+			"turn-1": {timer: clock.AfterFunc(time.Minute, func() {}), startedAt: clock.Now(), generation: 1},
+			"turn-2": {timer: clock.AfterFunc(time.Minute, func() {}), startedAt: clock.Now(), generation: 1},
+		},
 		closeCh: make(chan struct{}),
 	}
 
@@ -2155,6 +2395,12 @@ func TestCodexAdapterReadLoopClearsMirrorStateOnDisconnect(t *testing.T) {
 	}
 	if len(adapter.turnTexts) != 0 {
 		t.Fatalf("turnTexts = %d, want 0", len(adapter.turnTexts))
+	}
+	if len(adapter.turnThreadIDs) != 0 {
+		t.Fatalf("turnThreadIDs = %d, want 0", len(adapter.turnThreadIDs))
+	}
+	if len(adapter.turnTimers) != 0 {
+		t.Fatalf("turnTimers = %d, want 0", len(adapter.turnTimers))
 	}
 
 	for index, waitCh := range []chan codexResponseMessage{responseCh1, responseCh2} {

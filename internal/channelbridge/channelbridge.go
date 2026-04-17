@@ -33,12 +33,13 @@ type ClaudeConfig struct {
 
 // CodexConfig stores Codex adapter settings.
 type CodexConfig struct {
-	Transport        string
-	SocketPath       string
-	WebsocketURL     string
-	ThreadID         string
-	MirrorResponses  bool
-	AutoCreateThread bool
+	Transport          string
+	SocketPath         string
+	WebsocketURL       string
+	ThreadID           string
+	MirrorResponses    bool
+	MirrorFlushTimeout time.Duration
+	AutoCreateThread   bool
 }
 
 // HookEnv stores runtime dependencies shared by adapters.

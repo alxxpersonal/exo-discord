@@ -57,12 +57,13 @@ const (
 
 // CodexAdapter delivers inbound Discord events to a running Codex app-server.
 type CodexAdapter struct {
-	transport        string
-	socketPath       string
-	websocketURL     string
-	threadID         string
-	mirrorResponses  bool
-	autoCreateThread bool
+	transport          string
+	socketPath         string
+	websocketURL       string
+	threadID           string
+	mirrorResponses    bool
+	mirrorFlushTimeout time.Duration
+	autoCreateThread   bool
 
 	session     discordpkg.Session
 	audit       *AuditWriter
@@ -84,6 +85,8 @@ type CodexAdapter struct {
 	pendingMirrors map[int64]codexMirrorTarget
 	turns          map[string]codexMirrorTarget
 	turnTexts      map[string][]codexThreadItem
+	turnThreadIDs  map[string]string
+	turnTimers     map[string]codexMirrorTimerState
 	mirrorWG       sync.WaitGroup
 	nextID         int64
 	closeCh        chan struct{}
@@ -92,6 +95,7 @@ type CodexAdapter struct {
 	shuttingDown   bool
 	threadOrigin   codexThreadOrigin
 	recoverGroup   singleflight.Group
+	mirrorClock    codexTimerClock
 }
 
 // codexRecoverResult is the value returned by the singleflight recovery
@@ -266,6 +270,31 @@ type codexMirrorTarget struct {
 	MessageID string
 }
 
+type codexTimer interface {
+	Stop() bool
+}
+
+type codexTimerClock interface {
+	AfterFunc(time.Duration, func()) codexTimer
+	Now() time.Time
+}
+
+type codexMirrorTimerState struct {
+	timer      codexTimer
+	startedAt  time.Time
+	generation uint64
+}
+
+type realCodexTimerClock struct{}
+
+func (realCodexTimerClock) AfterFunc(delay time.Duration, callback func()) codexTimer {
+	return time.AfterFunc(delay, callback)
+}
+
+func (realCodexTimerClock) Now() time.Time {
+	return time.Now()
+}
+
 // --- Constructors ---
 
 // NewCodexAdapter creates a Codex bridge adapter.
@@ -276,24 +305,28 @@ func NewCodexAdapter(cfg CodexConfig, hookEnv HookEnv) (*CodexAdapter, error) {
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 
 	adapter := &CodexAdapter{
-		transport:        cfg.Transport,
-		socketPath:       cfg.SocketPath,
-		websocketURL:     cfg.WebsocketURL,
-		threadID:         cfg.ThreadID,
-		mirrorResponses:  cfg.MirrorResponses,
-		autoCreateThread: cfg.AutoCreateThread,
-		session:          hookEnv.Session,
-		audit:            NewAuditWriter(hookEnv.HomeDir),
-		dialContext:      (&net.Dialer{}).DialContext,
-		wsDialer:         websocket.DefaultDialer,
-		serviceCtx:       serviceCtx,
-		serviceCancel:    serviceCancel,
-		reconnectBackoff: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond},
-		pending:          make(map[int64]chan codexResponseMessage),
-		pendingMirrors:   make(map[int64]codexMirrorTarget),
-		turns:            make(map[string]codexMirrorTarget),
-		turnTexts:        make(map[string][]codexThreadItem),
-		closeCh:          make(chan struct{}),
+		transport:          cfg.Transport,
+		socketPath:         cfg.SocketPath,
+		websocketURL:       cfg.WebsocketURL,
+		threadID:           cfg.ThreadID,
+		mirrorResponses:    cfg.MirrorResponses,
+		mirrorFlushTimeout: cfg.MirrorFlushTimeout,
+		autoCreateThread:   cfg.AutoCreateThread,
+		session:            hookEnv.Session,
+		audit:              NewAuditWriter(hookEnv.HomeDir),
+		dialContext:        (&net.Dialer{}).DialContext,
+		wsDialer:           websocket.DefaultDialer,
+		serviceCtx:         serviceCtx,
+		serviceCancel:      serviceCancel,
+		reconnectBackoff:   []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond},
+		pending:            make(map[int64]chan codexResponseMessage),
+		pendingMirrors:     make(map[int64]codexMirrorTarget),
+		turns:              make(map[string]codexMirrorTarget),
+		turnTexts:          make(map[string][]codexThreadItem),
+		turnThreadIDs:      make(map[string]string),
+		turnTimers:         make(map[string]codexMirrorTimerState),
+		closeCh:            make(chan struct{}),
+		mirrorClock:        realCodexTimerClock{},
 	}
 	if cfg.ThreadID != "" {
 		adapter.threadOrigin = codexThreadOriginConfigured
@@ -403,6 +436,7 @@ func (a *CodexAdapter) Close() error {
 		a.shuttingDown = true
 		conn = a.conn
 		a.conn = nil
+		a.clearMirrorStateLocked()
 		a.mu.Unlock()
 
 		if a.serviceCancel != nil {
@@ -719,8 +753,7 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 				pending = append(pending, waitCh)
 			}
 			clear(a.pendingMirrors)
-			clear(a.turns)
-			clear(a.turnTexts)
+			a.clearMirrorStateLocked()
 			a.mu.Unlock()
 			for _, waitCh := range pending {
 				waitCh <- response
@@ -855,7 +888,12 @@ func (a *CodexAdapter) handleItemCompleted(params json.RawMessage) {
 	if a.turnTexts == nil {
 		a.turnTexts = make(map[string][]codexThreadItem)
 	}
+	if a.turnThreadIDs == nil {
+		a.turnThreadIDs = make(map[string]string)
+	}
 	a.turnTexts[completed.TurnID] = append(a.turnTexts[completed.TurnID], completed.Item)
+	a.turnThreadIDs[completed.TurnID] = completed.ThreadID
+	a.scheduleMirrorFlushLocked(completed.TurnID)
 	a.mu.Unlock()
 }
 
@@ -880,10 +918,16 @@ func (a *CodexAdapter) handleTurnCompleted(params json.RawMessage) {
 	}
 
 	a.mu.Lock()
+	a.stopMirrorTimerLocked(turnID)
 	target, ok := a.turns[turnID]
 	delete(a.turns, turnID)
 	buffered := a.turnTexts[turnID]
 	delete(a.turnTexts, turnID)
+	threadID := completed.ThreadID
+	if threadID == "" {
+		threadID = a.turnThreadIDs[turnID]
+	}
+	delete(a.turnThreadIDs, turnID)
 	a.mu.Unlock()
 	if !ok {
 		return
@@ -900,7 +944,7 @@ func (a *CodexAdapter) handleTurnCompleted(params json.RawMessage) {
 		return
 	}
 
-	a.dispatchMirror(target, turnID, completed.ThreadID, text)
+	a.dispatchMirror(target, turnID, threadID, text)
 }
 
 // handleTurnFailed clears accumulated state for a failed turn so memory is
@@ -915,9 +959,146 @@ func (a *CodexAdapter) handleTurnFailed(params json.RawMessage) {
 		return
 	}
 	a.mu.Lock()
+	a.stopMirrorTimerLocked(failed.Turn.ID)
 	delete(a.turns, failed.Turn.ID)
 	delete(a.turnTexts, failed.Turn.ID)
+	delete(a.turnThreadIDs, failed.Turn.ID)
 	a.mu.Unlock()
+}
+
+func (a *CodexAdapter) scheduleMirrorFlushLocked(turnID string) {
+	if a.mirrorFlushTimeout <= 0 {
+		return
+	}
+
+	clock := a.mirrorTimerClockLocked()
+	if a.turnTimers == nil {
+		a.turnTimers = make(map[string]codexMirrorTimerState)
+	}
+
+	generation := uint64(1)
+	if existing, ok := a.turnTimers[turnID]; ok {
+		generation = existing.generation + 1
+		if existing.timer != nil {
+			existing.timer.Stop()
+		}
+	}
+
+	state := codexMirrorTimerState{
+		startedAt:  clock.Now(),
+		generation: generation,
+	}
+	state.timer = clock.AfterFunc(a.mirrorFlushTimeout, func() {
+		a.forceFlushTurn(turnID, generation)
+	})
+	a.turnTimers[turnID] = state
+}
+
+func (a *CodexAdapter) forceFlushTurn(turnID string, generation uint64) {
+	if a.isShuttingDown() {
+		return
+	}
+
+	a.mu.Lock()
+	state, ok := a.turnTimers[turnID]
+	if !ok || state.generation != generation {
+		a.mu.Unlock()
+		return
+	}
+	delete(a.turnTimers, turnID)
+
+	target, ok := a.turns[turnID]
+	delete(a.turns, turnID)
+	buffered := a.turnTexts[turnID]
+	delete(a.turnTexts, turnID)
+	threadID := a.turnThreadIDs[turnID]
+	delete(a.turnThreadIDs, turnID)
+	clock := a.mirrorTimerClockLocked()
+	a.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	text := bufferedMirrorText(buffered)
+	if text == "" {
+		return
+	}
+
+	elapsed := clock.Now().Sub(state.startedAt)
+	bufferedCharCount := len([]rune(text))
+	slog.Warn("codex mirror forced flush",
+		"adapter", a.Name(),
+		"event", "mirror_forced_flush",
+		"turn_id", turnID,
+		"thread_id", threadID,
+		"channel_id", target.ChannelID,
+		"message_id", target.MessageID,
+		"reason", "timeout",
+		"elapsed", elapsed,
+		"buffered_char_count", bufferedCharCount,
+	)
+	if a.audit != nil {
+		meta := map[string]any{
+			"event":               "mirror_forced_flush",
+			"reason":              "timeout",
+			"turn_id":             turnID,
+			"thread_id":           threadID,
+			"channel_id":          target.ChannelID,
+			"message_id":          target.MessageID,
+			"elapsed":             elapsed.String(),
+			"buffered_char_count": bufferedCharCount,
+		}
+		if err := a.audit.Append(a.Name(), "codex_mirror_timeout", text, meta); err != nil {
+			slog.Warn("append codex mirror timeout audit",
+				"adapter", a.Name(),
+				"turn_id", turnID,
+				"error", err,
+			)
+		}
+	}
+	if a.isShuttingDown() {
+		return
+	}
+
+	a.dispatchMirror(target, turnID, threadID, text)
+}
+
+func (a *CodexAdapter) stopMirrorTimerLocked(turnID string) {
+	if a.turnTimers == nil {
+		return
+	}
+
+	state, ok := a.turnTimers[turnID]
+	if !ok {
+		return
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	delete(a.turnTimers, turnID)
+}
+
+func (a *CodexAdapter) stopAllMirrorTimersLocked() {
+	for turnID, state := range a.turnTimers {
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		delete(a.turnTimers, turnID)
+	}
+}
+
+func (a *CodexAdapter) clearMirrorStateLocked() {
+	a.stopAllMirrorTimersLocked()
+	clear(a.turns)
+	clear(a.turnTexts)
+	clear(a.turnThreadIDs)
+}
+
+func (a *CodexAdapter) mirrorTimerClockLocked() codexTimerClock {
+	if a.mirrorClock == nil {
+		a.mirrorClock = realCodexTimerClock{}
+	}
+	return a.mirrorClock
 }
 
 // dispatchMirror performs the outbound discord reply in a background

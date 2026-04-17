@@ -39,6 +39,15 @@ func TestDefaultConfigDisablesClaudePermissionRelay(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigSetsCodexMirrorFlushTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t.TempDir())
+	if got, want := cfg.Channel.Codex.MirrorFlushTimeout.Duration(), 30*time.Second; got != want {
+		t.Fatalf("MirrorFlushTimeout = %v, want %v", got, want)
+	}
+}
+
 func TestConfigValidateRejectsInvalidHookStdio(t *testing.T) {
 	t.Parallel()
 
@@ -124,6 +133,21 @@ func TestConfigValidateRejectsCodexWebsocketWithoutURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "websocket_url") {
 		t.Fatalf("Validate() error = %v, want websocket_url error", err)
+	}
+}
+
+func TestConfigValidateRejectsNegativeCodexMirrorFlushTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t.TempDir())
+	cfg.Channel.Codex.MirrorFlushTimeout = Duration(-time.Second)
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "mirror_flush_timeout") {
+		t.Fatalf("Validate() error = %v, want mirror_flush_timeout error", err)
 	}
 }
 
