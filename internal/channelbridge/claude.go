@@ -62,23 +62,7 @@ func (a *ClaudeAdapter) Name() string {
 
 // Deliver sends one event to Claude Code as a channel notification.
 func (a *ClaudeAdapter) Deliver(_ context.Context, event Event) error {
-	content := event.Message.Content
-	if content == "" && len(event.Message.Attachments) > 0 {
-		content = "(attachment)"
-	}
-
-	meta := map[string]any{
-		"chat_id":    event.Message.ChannelID,
-		"message_id": event.Message.ID,
-		"user":       event.Message.AuthorUsername,
-		"user_id":    event.Message.AuthorID,
-		"ts":         event.Message.Timestamp.UTC().Format("2006-01-02T15:04:05Z07:00"),
-	}
-	if len(event.Message.Attachments) > 0 {
-		meta["attachment_count"] = strconv.Itoa(len(event.Message.Attachments))
-		meta["attachments"] = claudeAttachmentSummary(event.Message.Attachments)
-	}
-
+	content, meta := BuildClaudeNotificationPayload(event)
 	return a.SendChannelNotification(content, meta)
 }
 
@@ -228,4 +212,26 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// BuildClaudeNotificationPayload builds the Claude channel content and metadata for an event.
+func BuildClaudeNotificationPayload(event Event) (string, map[string]any) {
+	content := event.Message.Content
+	if content == "" && len(event.Message.Attachments) > 0 {
+		content = "(attachment)"
+	}
+
+	meta := map[string]any{
+		"chat_id":    event.Message.ChannelID,
+		"message_id": event.Message.ID,
+		"user":       event.Message.AuthorUsername,
+		"user_id":    event.Message.AuthorID,
+		"ts":         event.Message.Timestamp.UTC().Format("2006-01-02T15:04:05Z07:00"),
+	}
+	if len(event.Message.Attachments) > 0 {
+		meta["attachment_count"] = strconv.Itoa(len(event.Message.Attachments))
+		meta["attachments"] = claudeAttachmentSummary(event.Message.Attachments)
+	}
+
+	return content, meta
 }

@@ -174,6 +174,7 @@ func NewRootCommand(env Environment) *cobra.Command {
 	root.AddCommand(newAccessCommand(env))
 	root.AddCommand(newPairCommand(env))
 	root.AddCommand(newMCPCommand(env))
+	root.AddCommand(newChannelPluginCommand(env))
 	root.AddCommand(newUserInstallModeCommand())
 	root.AddCommand(newAuthCommand(env))
 
