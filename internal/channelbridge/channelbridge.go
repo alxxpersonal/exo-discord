@@ -108,7 +108,17 @@ func NewAdapter(cfg Config, hookEnv HookEnv) (Adapter, error) {
 	}
 
 	if len(enabled) > 1 {
-		return nil, fmt.Errorf("multiple channel adapters are not configured yet")
+		adapters := make([]Adapter, 0, len(enabled))
+		for _, name := range enabled {
+			singleCfg := cfg
+			singleCfg.Enabled = []string{name}
+			adapter, err := NewAdapter(singleCfg, hookEnv)
+			if err != nil {
+				return nil, err
+			}
+			adapters = append(adapters, adapter)
+		}
+		return multiAdapter(adapters), nil
 	}
 
 	switch enabled[0] {
@@ -121,8 +131,32 @@ func NewAdapter(cfg Config, hookEnv HookEnv) (Adapter, error) {
 		}
 		return NewClaudeAdapter(hookEnv.ClaudeWriter, NewAuditWriter(hookEnv.HomeDir)), nil
 	case "codex":
-		return nil, fmt.Errorf("codex adapter is not configured")
+		return NewCodexAdapter(cfg.Codex, hookEnv)
 	default:
 		return nil, fmt.Errorf("unsupported channel adapter %q", enabled[0])
 	}
+}
+
+type multiAdapter []Adapter
+
+func (a multiAdapter) Name() string {
+	return "multi"
+}
+
+func (a multiAdapter) Deliver(ctx context.Context, event Event) error {
+	for _, adapter := range a {
+		if err := adapter.Deliver(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a multiAdapter) Close() error {
+	for _, adapter := range a {
+		if err := adapter.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -2,6 +2,7 @@ package channelbridge
 
 import (
 	"bytes"
+	"path/filepath"
 	"testing"
 )
 
@@ -42,5 +43,29 @@ func TestNewAdapterReturnsClaudeAdapter(t *testing.T) {
 
 	if adapter.Name() != "claude" {
 		t.Fatalf("adapter name = %q, want claude", adapter.Name())
+	}
+}
+
+func TestNewAdapterReturnsMultiAdapter(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(t.TempDir(), "broker.sock")
+
+	adapter, err := NewAdapter(Config{
+		Enabled: []string{"claude", "codex"},
+		Codex: CodexConfig{
+			Transport:  codexTransportUnix,
+			SocketPath: socketPath,
+		},
+	}, HookEnv{
+		HomeDir:      t.TempDir(),
+		ClaudeWriter: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	if adapter.Name() != "multi" {
+		t.Fatalf("adapter name = %q, want multi", adapter.Name())
 	}
 }
