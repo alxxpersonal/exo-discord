@@ -2,10 +2,12 @@ package channelbridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -2018,6 +2020,193 @@ func TestCodexAdapterDeliverRegistersMirrorBeforeImmediateCompletion(t *testing.
 	}
 
 	<-readLoopDone
+}
+
+func TestCodexAdapterMirrorPrefersFinalAnswerPhase(t *testing.T) {
+	t.Parallel()
+
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses: true,
+		session:         session,
+		turnTexts:       make(map[string][]codexThreadItem),
+		turns: map[string]codexMirrorTarget{
+			"turn-phase": {ChannelID: "chan-1", MessageID: "msg-1"},
+		},
+	}
+
+	for _, item := range []codexThreadItem{
+		{Type: "agentMessage", ID: "commentary", Text: "thinking out loud", Phase: "commentary"},
+		{Type: "agentMessage", ID: "final", Text: "final reply", Phase: "final_answer"},
+	} {
+		payload, err := json.Marshal(codexItemCompletedNotification{
+			ThreadID: "thread-phase",
+			TurnID:   "turn-phase",
+			Item:     item,
+		})
+		if err != nil {
+			t.Fatalf("Marshal(item) error = %v", err)
+		}
+		adapter.handleNotification(codexNotificationMessage{Method: "item/completed", Params: payload})
+	}
+
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-phase",
+		Turn:     codexTurn{ID: "turn-phase"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
+
+	adapter.mirrorWG.Wait()
+
+	if got := session.replyCount(); got != 1 {
+		t.Fatalf("reply count = %d, want 1", got)
+	}
+	if got := session.firstReply().Text; got != "final reply" {
+		t.Fatalf("reply text = %q, want final reply", got)
+	}
+}
+
+func TestCodexAdapterMirrorFallsBackToLastBufferedMessageWithoutPhase(t *testing.T) {
+	t.Parallel()
+
+	session := &mirrorSession{}
+	adapter := &CodexAdapter{
+		mirrorResponses: true,
+		session:         session,
+		turnTexts:       make(map[string][]codexThreadItem),
+		turns: map[string]codexMirrorTarget{
+			"turn-fallback": {ChannelID: "chan-1", MessageID: "msg-1"},
+		},
+	}
+
+	for _, text := range []string{"commentary without phase", "final without phase"} {
+		payload, err := json.Marshal(codexItemCompletedNotification{
+			ThreadID: "thread-fallback",
+			TurnID:   "turn-fallback",
+			Item: codexThreadItem{
+				Type: "agentMessage",
+				ID:   text,
+				Text: text,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Marshal(item) error = %v", err)
+		}
+		adapter.handleNotification(codexNotificationMessage{Method: "item/completed", Params: payload})
+	}
+
+	turnPayload, err := json.Marshal(codexTurnCompletedNotification{
+		ThreadID: "thread-fallback",
+		Turn:     codexTurn{ID: "turn-fallback"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(turn) error = %v", err)
+	}
+	adapter.handleNotification(codexNotificationMessage{Method: "turn/completed", Params: turnPayload})
+
+	adapter.mirrorWG.Wait()
+
+	if got := session.replyCount(); got != 1 {
+		t.Fatalf("reply count = %d, want 1", got)
+	}
+	if got := session.firstReply().Text; got != "final without phase" {
+		t.Fatalf("reply text = %q, want final without phase", got)
+	}
+}
+
+func TestCodexAdapterReadLoopClearsMirrorStateOnDisconnect(t *testing.T) {
+	t.Parallel()
+
+	responseCh1 := make(chan codexResponseMessage, 1)
+	responseCh2 := make(chan codexResponseMessage, 1)
+	adapter := &CodexAdapter{
+		conn: &scriptedCodexConnection{},
+		pending: map[int64]chan codexResponseMessage{
+			1: responseCh1,
+			2: responseCh2,
+		},
+		pendingMirrors: map[int64]codexMirrorTarget{
+			3: {ChannelID: "chan-3", MessageID: "msg-3"},
+		},
+		turns: map[string]codexMirrorTarget{
+			"turn-1": {ChannelID: "chan-1", MessageID: "msg-1"},
+			"turn-2": {ChannelID: "chan-2", MessageID: "msg-2"},
+		},
+		turnTexts: map[string][]codexThreadItem{
+			"turn-1": {{Type: "agentMessage", Text: "one"}},
+			"turn-2": {{Type: "agentMessage", Text: "two"}},
+		},
+		closeCh: make(chan struct{}),
+	}
+
+	adapter.readLoop(context.Background())
+
+	if len(adapter.pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(adapter.pending))
+	}
+	if len(adapter.pendingMirrors) != 0 {
+		t.Fatalf("pendingMirrors = %d, want 0", len(adapter.pendingMirrors))
+	}
+	if len(adapter.turns) != 0 {
+		t.Fatalf("turns = %d, want 0", len(adapter.turns))
+	}
+	if len(adapter.turnTexts) != 0 {
+		t.Fatalf("turnTexts = %d, want 0", len(adapter.turnTexts))
+	}
+
+	for index, waitCh := range []chan codexResponseMessage{responseCh1, responseCh2} {
+		select {
+		case response := <-waitCh:
+			if response.Error == nil || !strings.Contains(response.Error.Message, "EOF") {
+				t.Fatalf("response %d error = %#v, want EOF", index, response.Error)
+			}
+		default:
+			t.Fatalf("response channel %d did not receive disconnect error", index)
+		}
+	}
+}
+
+func TestCodexAdapterHandleErrorNotificationLogsDetails(t *testing.T) {
+	var buffer bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buffer, nil)))
+	defer slog.SetDefault(previous)
+
+	adapter := &CodexAdapter{}
+	payload, err := json.Marshal(codexErrorNotification{
+		Error: codexTurnError{
+			Message:           "bridge exploded",
+			AdditionalDetails: "retry later",
+		},
+		WillRetry: true,
+		ThreadID:  "thread-err",
+		TurnID:    "turn-err",
+	})
+	if err != nil {
+		t.Fatalf("Marshal(error notification) error = %v", err)
+	}
+
+	adapter.handleNotification(codexNotificationMessage{Method: "error", Params: payload})
+	output := buffer.String()
+	if !strings.Contains(output, "codex error notification") {
+		t.Fatalf("log output = %q, want codex error notification entry", output)
+	}
+	if !strings.Contains(output, "bridge exploded") {
+		t.Fatalf("log output = %q, want message", output)
+	}
+	if !strings.Contains(output, "thread_id=thread-err") {
+		t.Fatalf("log output = %q, want thread id", output)
+	}
+
+	buffer.Reset()
+	adapter.handleNotification(codexNotificationMessage{Method: "error", Params: json.RawMessage("{")})
+	output = buffer.String()
+	if !strings.Contains(output, "codex error notification decode failed") {
+		t.Fatalf("log output = %q, want decode failure entry", output)
+	}
 }
 
 func TestCodexAdapterHandleItemCompletedTracksKnownAgentMessages(t *testing.T) {

@@ -248,6 +248,18 @@ type codexThreadItem struct {
 	Phase string `json:"phase,omitempty"`
 }
 
+type codexTurnError struct {
+	Message           string `json:"message"`
+	AdditionalDetails string `json:"additionalDetails,omitempty"`
+}
+
+type codexErrorNotification struct {
+	Error     codexTurnError `json:"error"`
+	WillRetry bool           `json:"willRetry"`
+	ThreadID  string         `json:"threadId"`
+	TurnID    string         `json:"turnId"`
+}
+
 type codexMirrorTarget struct {
 	ChannelID string
 	GuildID   string
@@ -707,6 +719,8 @@ func (a *CodexAdapter) readLoop(ctx context.Context) {
 				pending = append(pending, waitCh)
 			}
 			clear(a.pendingMirrors)
+			clear(a.turns)
+			clear(a.turnTexts)
 			a.mu.Unlock()
 			for _, waitCh := range pending {
 				waitCh <- response
@@ -796,6 +810,10 @@ func (a *CodexAdapter) handleServerRequest(ctx context.Context, method string, i
 }
 
 func (a *CodexAdapter) handleNotification(notification codexNotificationMessage) {
+	if notification.Method == "error" {
+		a.handleErrorNotification(notification.Params)
+		return
+	}
 	if !a.mirrorResponses || a.session == nil {
 		return
 	}
@@ -871,9 +889,9 @@ func (a *CodexAdapter) handleTurnCompleted(params json.RawMessage) {
 		return
 	}
 
-	text := joinCodexAgentMessages(buffered)
+	text := bufferedMirrorText(buffered)
 	if text == "" {
-		text = lastCodexAgentMessage(completed.Turn.Items)
+		text = legacyMirrorText(completed.Turn.Items)
 	}
 	if text == "" {
 		return
@@ -1296,6 +1314,39 @@ func formatCodexInput(event Event) string {
 	return buffer.String()
 }
 
+func bufferedMirrorText(items []codexThreadItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+
+	finals := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type != "agentMessage" || item.Text == "" {
+			continue
+		}
+		if item.Phase == "final_answer" {
+			finals = append(finals, item.Text)
+		}
+	}
+	if len(finals) > 0 {
+		return strings.Join(finals, "\n\n")
+	}
+	return lastCodexAgentMessage(items)
+}
+
+func legacyMirrorText(items []codexThreadItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+
+	for _, item := range items {
+		if item.Phase != "" {
+			return bufferedMirrorText(items)
+		}
+	}
+	return joinCodexAgentMessages(items)
+}
+
 func lastCodexAgentMessage(items []codexThreadItem) string {
 	for index := len(items) - 1; index >= 0; index-- {
 		if items[index].Type == "agentMessage" && items[index].Text != "" {
@@ -1341,6 +1392,29 @@ func (a *CodexAdapter) promotePendingMirrorLocked(id int64, response codexRespon
 	}
 	a.turns[started.Turn.ID] = target
 	return nil
+}
+
+func (a *CodexAdapter) handleErrorNotification(params json.RawMessage) {
+	var notification codexErrorNotification
+	if err := json.Unmarshal(params, &notification); err != nil {
+		slog.Warn("codex error notification decode failed",
+			"adapter", a.Name(),
+			"error", err,
+		)
+		return
+	}
+
+	attrs := []any{
+		"adapter", a.Name(),
+		"thread_id", notification.ThreadID,
+		"turn_id", notification.TurnID,
+		"will_retry", notification.WillRetry,
+		"error", notification.Error.Message,
+	}
+	if notification.Error.AdditionalDetails != "" {
+		attrs = append(attrs, "additional_details", notification.Error.AdditionalDetails)
+	}
+	slog.Warn("codex error notification", attrs...)
 }
 
 func replyWithChunks(ctx context.Context, session discordpkg.Session, target codexMirrorTarget, text string) error {

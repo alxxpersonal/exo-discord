@@ -81,11 +81,11 @@ Delivery outcomes are audited in two places with different coverage:
 
 `exo-discord codex-bridge --mirror-responses` tells the bridge to post the codex reply text back into the originating discord channel as a threaded reply. With the flag off, the bridge is one-way: discord DM in, codex turn started, no outbound reply.
 
-The app-server speaks the `app-server-protocol` v2 notification stream. After `turn/start`, codex streams notifications unsolicited (no subscribe RPC is required). The reply arrives as a sequence of `item/completed` notifications carrying `ThreadItem::AgentMessage { text }`, followed by a `turn/completed` notification whose `turn.items` slice is empty by contract. The bridge buffers the agentMessage text per turn id and flushes the joined buffer to discord on `turn/completed`.
+The app-server speaks the `app-server-protocol` v2 notification stream. After `turn/start`, codex streams notifications unsolicited (no subscribe RPC is required). The reply arrives as a sequence of `item/completed` notifications carrying `ThreadItem::AgentMessage { text, phase }`, followed by a `turn/completed` notification whose `turn.items` slice is empty by contract. The bridge buffers agent messages per turn id, prefers `phase=final_answer` when present, otherwise falls back to the last buffered agent message. Legacy `turn/completed` payloads that still carry unphased items keep the older joined-message fallback for compatibility.
 
-Each successful mirror emits a `codex mirror emitted` slog record with `event=mirror_emitted`, `turn_id`, `thread_id`, `channel_id`, `target_message_id` (the inbound discord message the reply threads under), `chunk_count`, and `char_count`. Failures emit `codex mirror reply failed` with the same keys plus the error.
+Each successful mirror emits a `codex mirror emitted` slog record with `event=mirror_emitted`, `turn_id`, `thread_id`, `channel_id`, `message_id` (the inbound discord message the reply threads under), `chunk_count`, and `char_count`. Failures emit `codex mirror reply failed` with the same keys plus the error.
 
-Replies longer than 2000 characters are split across discord messages: the first chunk is posted as a reply to the originating message, follow-up chunks are sent as plain channel messages. Shutdown (`Close`) cancels the mirror service context so a pending Reply call unblocks cleanly, and waits for any in-flight mirror goroutine before returning.
+Replies longer than 2000 characters are split across discord messages: the first chunk is posted as a reply to the originating message, follow-up chunks are sent as plain channel messages. Shutdown (`Close`) cancels the mirror service context so a pending Reply call unblocks cleanly, waits for any in-flight mirror goroutine before returning, and drops buffered turn state on disconnect because the app-server lost that turn state too.
 
 ## Development Activation
 
