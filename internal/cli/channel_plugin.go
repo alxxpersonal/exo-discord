@@ -90,6 +90,12 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				return err
 			}
 
+			if err := accessManager.StartAutoReload(serviceCtx, resolved.ConfigPath, logger); err != nil {
+				stopService()
+				stopServer()
+				return err
+			}
+
 			dispatchHook := &channelDispatchHook{
 				dispatch: func(_ context.Context, envelope hook.Envelope) error {
 					event := eventFromEnvelope(envelope)
