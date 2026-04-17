@@ -54,3 +54,14 @@ Read this file and all rules in `.claude/rules/` at session start. For deeper de
 - Bot mode: gateway-driven, `Authorization: Bot <token>`. Full write capability.
 - User-install mode: REST-only, `Authorization: Bearer <access_token>`. Read-only. Tokens persisted per Discord user id under `~/.exo-discord/oauth/` with `0600` file perms and `0700` dir perms.
 - Mode switches via the `mode` key in config. CLI `auth login`, `auth list`, `auth revoke` manage stored oauth tokens. `bot-mode` remains the streaming runtime; user-install sessions never open a gateway and never emit inbound events.
+
+## Operational Commands
+
+| Command | Purpose | Notes |
+| --- | --- | --- |
+| `exo-discord bot-mode` | Run the standard Discord gateway plus hook runtime. | Primary runtime path. |
+| `exo-discord listen` | Print normalized inbound envelopes to stdout. | No auto-replies. |
+| `exo-discord mcp serve` | Expose the MCP tool surface over stdio. | Tool control surface only. |
+| `exo-discord channel-plugin` | Run the Claude Code channel plugin over stdio. | Declares `claude/channel` capability and injects inbound Discord messages as channel notifications. |
+| `exo-discord codex-bridge --transport ...` | Bridge inbound Discord messages into a running Codex app-server. | Requires Unix socket or websocket connectivity to Codex. |
+| `exo-discord auth login|list|revoke` | Manage OAuth user-install tokens. | User-install mode remains read-only. |

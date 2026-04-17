@@ -3,6 +3,7 @@ package channelbridge
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -58,6 +59,24 @@ func TestCodexThreadStoreDiscoverActiveThreadPrefersActive(t *testing.T) {
 	}
 }
 
+func TestCodexThreadStoreDiscoverActiveThreadFallsBackToFirstThread(t *testing.T) {
+	t.Parallel()
+
+	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{
+		threads: []codexThreadSummary{
+			{ID: "thread-idle", Status: "idle", UpdatedAt: 1},
+		},
+	})
+
+	threadID, err := store.DiscoverActiveThread(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverActiveThread() error = %v", err)
+	}
+	if threadID != "thread-idle" {
+		t.Fatalf("thread id = %q, want thread-idle", threadID)
+	}
+}
+
 func TestCodexThreadStoreLoadThreadMissingFile(t *testing.T) {
 	t.Parallel()
 
@@ -65,6 +84,31 @@ func TestCodexThreadStoreLoadThreadMissingFile(t *testing.T) {
 	threadID, ok := store.LoadThread()
 	if ok {
 		t.Fatalf("LoadThread() ok = true, want false with thread %q", threadID)
+	}
+}
+
+func TestCodexThreadStoreSaveThreadRejectsEmptyID(t *testing.T) {
+	t.Parallel()
+
+	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
+	if err := store.SaveThread(""); err == nil {
+		t.Fatal("SaveThread() error = nil, want error")
+	}
+}
+
+func TestCodexThreadStoreLoadThreadRejectsInvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	store := NewCodexThreadStore(t.TempDir(), fakeThreadListProvider{})
+	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(store.path, []byte("{bad"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if threadID, ok := store.LoadThread(); ok {
+		t.Fatalf("LoadThread() = %q, true; want false", threadID)
 	}
 }
 

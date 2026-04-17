@@ -3,7 +3,6 @@ package channelbridge
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,17 +124,4 @@ func (s *CodexThreadStore) LoadThread() (string, bool) {
 	}
 
 	return file.ThreadID, true
-}
-
-// --- Helpers ---
-
-func openCodexThreadFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("read codex thread file %s: %w", path, err)
-	}
-	return data, nil
 }

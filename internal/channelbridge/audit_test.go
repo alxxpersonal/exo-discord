@@ -91,3 +91,23 @@ func TestAuditWriterAppendRejectsMissingFields(t *testing.T) {
 		t.Fatal("Append() error = nil, want source error")
 	}
 }
+
+func TestAuditWriterAppendReusesExistingFile(t *testing.T) {
+	t.Parallel()
+
+	writer := NewAuditWriter(t.TempDir())
+	if err := writer.Append("claude", "discord", "one", nil); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := writer.Append("claude", "discord", "two", nil); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	data, err := os.ReadFile(writer.Path())
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got := len(strings.Split(strings.TrimSpace(string(data)), "\n")); got != 2 {
+		t.Fatalf("line count = %d, want 2", got)
+	}
+}

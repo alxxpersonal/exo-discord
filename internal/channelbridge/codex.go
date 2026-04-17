@@ -341,7 +341,7 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
 	a.conn = conn
 	a.mu.Unlock()
 
-	go a.readLoop()
+	go a.readLoop(context.WithoutCancel(ctx))
 
 	if err := a.request(ctx, "initialize", codexInitializeParams{
 		ClientInfo: codexClientInfo{
@@ -371,9 +371,15 @@ func (a *CodexAdapter) connect(ctx context.Context) (codexConnection, error) {
 			reader: bufio.NewReader(conn),
 		}, nil
 	case codexTransportWS:
-		conn, _, err := a.wsDialer.DialContext(ctx, a.websocketURL, http.Header{})
+		conn, response, err := a.wsDialer.DialContext(ctx, a.websocketURL, http.Header{})
 		if err != nil {
+			if response != nil && response.Body != nil {
+				_ = response.Body.Close()
+			}
 			return nil, fmt.Errorf("connect codex websocket %s: %w", a.websocketURL, err)
+		}
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
 		}
 		return &codexWebsocketConnection{conn: conn}, nil
 	default:
@@ -381,7 +387,7 @@ func (a *CodexAdapter) connect(ctx context.Context) (codexConnection, error) {
 	}
 }
 
-func (a *CodexAdapter) readLoop() {
+func (a *CodexAdapter) readLoop(ctx context.Context) {
 	for {
 		a.mu.Lock()
 		conn := a.conn
@@ -390,7 +396,7 @@ func (a *CodexAdapter) readLoop() {
 			return
 		}
 
-		data, err := conn.ReadJSON(context.Background())
+		data, err := conn.ReadJSON(ctx)
 		if err != nil {
 			a.mu.Lock()
 			if a.closeErr == nil {
@@ -413,7 +419,7 @@ func (a *CodexAdapter) readLoop() {
 			if methodRaw, hasMethod := envelope["method"]; hasMethod {
 				var method string
 				if err := json.Unmarshal(methodRaw, &method); err == nil {
-					a.handleServerRequest(method, idRaw)
+					a.handleServerRequest(ctx, method, idRaw)
 				}
 				continue
 			}
@@ -449,7 +455,7 @@ func (a *CodexAdapter) readLoop() {
 	}
 }
 
-func (a *CodexAdapter) handleServerRequest(method string, idRaw json.RawMessage) {
+func (a *CodexAdapter) handleServerRequest(ctx context.Context, method string, idRaw json.RawMessage) {
 	var id int64
 	if err := json.Unmarshal(idRaw, &id); err != nil {
 		return
@@ -473,7 +479,7 @@ func (a *CodexAdapter) handleServerRequest(method string, idRaw json.RawMessage)
 	if conn == nil {
 		return
 	}
-	_ = conn.WriteJSON(context.Background(), response)
+	_ = conn.WriteJSON(ctx, response)
 }
 
 func (a *CodexAdapter) handleNotification(notification codexNotificationMessage) {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -26,7 +27,11 @@ func TestCodexAdapterDeliverWritesTurnStartOverUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			t.Fatalf("Close() error = %v", closeErr)
+		}
+	}()
 	defer func() {
 		_ = os.Remove(socketPath)
 	}()
@@ -42,7 +47,9 @@ func TestCodexAdapterDeliverWritesTurnStartOverUnixSocket(t *testing.T) {
 		if acceptErr != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 
 		reader := bufio.NewReader(conn)
 		for index := 0; index < 3; index++ {
@@ -143,12 +150,15 @@ func TestCodexAdapterDeliverWritesTurnStartOverWebsocket(t *testing.T) {
 	requests := make(chan capturedRequest, 3)
 
 	server := http.Server{
+		ReadHeaderTimeout: time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := upgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return
 			}
-			defer conn.Close()
+			defer func() {
+				_ = conn.Close()
+			}()
 
 			for index := 0; index < 3; index++ {
 				_, payload, readErr := conn.ReadMessage()
@@ -187,7 +197,11 @@ func TestCodexAdapterDeliverWritesTurnStartOverWebsocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			t.Fatalf("Close() error = %v", closeErr)
+		}
+	}()
 	go func() {
 		_ = server.Serve(listener)
 	}()

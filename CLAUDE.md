@@ -26,6 +26,15 @@ See `AGENTS.md` for agent execution rules.
 - Audit events append to `~/.exo-discord/audit.log` as JSONL.
 - Attachment handling uses metadata in hook payloads and local saves to `~/.exo-discord/inbox/`.
 
+### Channel Injection
+
+- `exo-discord channel-plugin` is the Claude Code path. Claude spawns the binary as an MCP stdio subprocess, the server advertises `experimental["claude/channel"]`, and inbound Discord messages are forwarded as `notifications/claude/channel`.
+- `exo-discord codex-bridge` is the Codex path. exo-discord opens the Discord gateway locally, connects to a running Codex app-server over Unix socket or websocket, and forwards inbound Discord messages with `turn/start`.
+- Claude activation uses `claude --dangerously-load-development-channels --channels plugin:exo-discord@local` for local development or the approved marketplace identifier once published.
+- Codex activation uses `codex app-server --listen ws://127.0.0.1:8765` or a known broker socket, then `exo-discord codex-bridge --transport ws --websocket-url ws://127.0.0.1:8765 --thread <id>` or the equivalent Unix socket flags.
+- Channel config lives under `[channel]` in `.exo-discord` or `~/.exo-discord/config.toml`. `channel.claude.permission_relay` controls the Claude permission capability declaration. `channel.codex.transport`, `socket_path`, `websocket_url`, `thread_id`, and `mirror_responses` control the Codex bridge defaults.
+- Channel bridge audit events append to `~/.exo-discord/channel-audit.log`. The existing runtime audit remains `~/.exo-discord/audit.log`.
+
 ### User-Install Mode
 
 - Lives in `internal/discord/userinstall/`. Implements the `discord.Session` interface.
