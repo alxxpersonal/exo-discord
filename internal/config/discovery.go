@@ -40,10 +40,12 @@ func DiscoverFrom(startDir string, homeDir string) (ResolvedConfig, error) {
 		info, err := os.Stat(candidate)
 		switch {
 		case err == nil:
-			if !info.Mode().IsRegular() {
-				return ResolvedConfig{}, fmt.Errorf("config path %s is not a file", candidate)
+			if info.Mode().IsRegular() {
+				return loadResolved(candidate, homeDir)
 			}
-			return loadResolved(candidate, homeDir)
+			// Non-regular match (e.g. the home state directory shares the
+			// projectConfigName). Treat it as not-a-match and keep walking so
+			// the home fallback can still resolve.
 		case errors.Is(err, os.ErrNotExist):
 		default:
 			return ResolvedConfig{}, fmt.Errorf("failed to stat %s: %w", candidate, err)
