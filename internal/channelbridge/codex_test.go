@@ -751,6 +751,14 @@ func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
 		err: errors.New("no codex threads were returned by thread/list"),
 	})
 
+	// warm the adapter's single connection before fanning out so the 3
+	// concurrent Delivers do not race to open multiple sockets against a
+	// mock server that only Accepts once. the recovery singleflight is the
+	// subject of this test, not the connect handshake.
+	if err := adapter.ensureConnected(context.Background()); err != nil {
+		t.Fatalf("ensureConnected() error = %v", err)
+	}
+
 	// release the stale turn/start responses once all concurrent callers
 	// have sent their initial turn/start request.
 	go func() {
