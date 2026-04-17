@@ -56,6 +56,7 @@ func newChannelPluginCommand(env Environment) *cobra.Command {
 				Channel: mcppkg.ChannelOptions{
 					Enabled:         true,
 					PermissionRelay: resolved.Config.Channel.Claude.PermissionRelay,
+					AuditWriter:     channelbridge.NewAuditWriter(env.HomeDir),
 				},
 			})
 

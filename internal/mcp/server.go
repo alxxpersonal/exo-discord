@@ -25,6 +25,7 @@ type Options struct {
 type ChannelOptions struct {
 	Enabled         bool
 	PermissionRelay bool
+	AuditWriter     *channelbridge.AuditWriter
 }
 
 // Server serves the exo-discord MCP surface.
@@ -80,7 +81,7 @@ func NewServerWithOptions(session discordpkg.Session, manager discordpkg.Manager
 	registerTools(srv.server, session, manager)
 
 	if options.Channel.Enabled {
-		srv.notification = channelbridge.NewClaudeAdapter(output, nil)
+		srv.notification = channelbridge.NewClaudeAdapter(output, options.Channel.AuditWriter)
 	}
 
 	return srv
