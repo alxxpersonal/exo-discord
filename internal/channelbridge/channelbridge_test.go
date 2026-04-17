@@ -1,6 +1,9 @@
 package channelbridge
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // --- Test Cases ---
 
@@ -21,5 +24,23 @@ func TestNewAdapterRejectsUnsupportedAdapter(t *testing.T) {
 	}, HookEnv{})
 	if err == nil {
 		t.Fatal("NewAdapter() error = nil, want error")
+	}
+}
+
+func TestNewAdapterReturnsClaudeAdapter(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := NewAdapter(Config{
+		Enabled: []string{"claude"},
+	}, HookEnv{
+		HomeDir:      t.TempDir(),
+		ClaudeWriter: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("NewAdapter() error = %v", err)
+	}
+
+	if adapter.Name() != "claude" {
+		t.Fatalf("adapter name = %q, want claude", adapter.Name())
 	}
 }

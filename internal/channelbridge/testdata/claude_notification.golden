@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"notifications/claude/channel","params":{"content":"hello","meta":{"chat_id":"chan-1","message_id":"msg-1","user":"alice","user_id":"user-1","ts":"2026-04-17T12:00:00Z"}}}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	discordpkg "github.com/alxxpersonal/exo-discord/internal/discord"
@@ -95,12 +96,33 @@ func NewAdapter(cfg Config, hookEnv HookEnv) (Adapter, error) {
 		return nil, fmt.Errorf("channel adapter is not enabled")
 	}
 
-	switch cfg.Enabled[0] {
+	enabled := make([]string, 0, len(cfg.Enabled))
+	for _, name := range cfg.Enabled {
+		trimmed := strings.TrimSpace(name)
+		if trimmed != "" {
+			enabled = append(enabled, trimmed)
+		}
+	}
+	if len(enabled) == 0 {
+		return nil, fmt.Errorf("channel adapter is not enabled")
+	}
+
+	if len(enabled) > 1 {
+		return nil, fmt.Errorf("multiple channel adapters are not configured yet")
+	}
+
+	switch enabled[0] {
 	case "claude":
-		return nil, fmt.Errorf("claude adapter is not configured")
+		if hookEnv.ClaudeWriter == nil {
+			return nil, fmt.Errorf("claude writer is required")
+		}
+		if hookEnv.HomeDir == "" {
+			return nil, fmt.Errorf("home dir is required")
+		}
+		return NewClaudeAdapter(hookEnv.ClaudeWriter, NewAuditWriter(hookEnv.HomeDir)), nil
 	case "codex":
 		return nil, fmt.Errorf("codex adapter is not configured")
 	default:
-		return nil, fmt.Errorf("unsupported channel adapter %q", cfg.Enabled[0])
+		return nil, fmt.Errorf("unsupported channel adapter %q", enabled[0])
 	}
 }
