@@ -3,6 +3,7 @@ package channelbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,11 @@ import (
 
 // --- Constants ---
 
-const codexThreadFileName = "codex-thread.json"
+const (
+	codexThreadFileName    = "codex-thread.json"
+	codexThreadTmpSuffix   = ".tmp"
+	codexThreadFileVersion = 2
+)
 
 // --- Types ---
 
@@ -29,7 +34,9 @@ type codexThreadSummary struct {
 }
 
 type codexThreadFile struct {
+	Version   int       `json:"version,omitempty"`
 	ThreadID  string    `json:"thread_id"`
+	Origin    string    `json:"origin,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -83,8 +90,12 @@ func (s *CodexThreadStore) DiscoverActiveThread(ctx context.Context) (string, er
 	return "", fmt.Errorf("no codex thread id was returned by thread/list")
 }
 
-// SaveThread persists a thread id for later reuse.
-func (s *CodexThreadStore) SaveThread(id string) error {
+// SaveThread persists a thread id (and its origin) for later reuse. Writes
+// are atomic: the payload is flushed to a sibling .tmp file and renamed
+// into place so a process death or a concurrent SaveThread cannot truncate
+// the cache file to an empty or partial JSON object. Matches the
+// temp-then-rename pattern used by the channel audit writer.
+func (s *CodexThreadStore) SaveThread(id string, origin codexThreadOrigin) error {
 	if id == "" {
 		return fmt.Errorf("codex thread id must not be empty")
 	}
@@ -97,36 +108,56 @@ func (s *CodexThreadStore) SaveThread(id string) error {
 	}
 
 	data, err := json.Marshal(codexThreadFile{
+		Version:   codexThreadFileVersion,
 		ThreadID:  id,
+		Origin:    string(origin),
 		UpdatedAt: s.now().UTC(),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal codex thread file: %w", err)
 	}
 
-	if err := os.WriteFile(s.path, append(data, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write codex thread file %s: %w", s.path, err)
+	tmpPath := s.path + codexThreadTmpSuffix
+	// best-effort cleanup of a stale tmp from a prior crash; ignore missing.
+	if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale codex thread tmp %s: %w", tmpPath, err)
 	}
-	if err := os.Chmod(s.path, 0o600); err != nil {
-		return fmt.Errorf("chmod codex thread file %s: %w", s.path, err)
+	if err := os.WriteFile(tmpPath, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write codex thread tmp %s: %w", tmpPath, err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod codex thread tmp %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename codex thread tmp to %s: %w", s.path, err)
 	}
 	return config.RequireExactFilePerms(s.path, 0o600)
 }
 
-// LoadThread returns the saved thread id if it exists.
-func (s *CodexThreadStore) LoadThread() (string, bool) {
+// LoadThread returns the saved thread id and its origin if the cache file
+// exists and parses. Older (v1) cache files without an origin field are
+// treated as cached so recovery uses resume as the first fallback.
+func (s *CodexThreadStore) LoadThread() (string, codexThreadOrigin, bool) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 
 	var file codexThreadFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		return "", false
+		return "", "", false
 	}
 	if file.ThreadID == "" {
-		return "", false
+		return "", "", false
 	}
 
-	return file.ThreadID, true
+	origin := codexThreadOrigin(file.Origin)
+	switch origin {
+	case codexThreadOriginConfigured, codexThreadOriginCached, codexThreadOriginAutoCreated:
+	default:
+		origin = codexThreadOriginCached
+	}
+	return file.ThreadID, origin, true
 }

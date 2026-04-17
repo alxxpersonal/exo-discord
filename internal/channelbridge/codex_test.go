@@ -377,8 +377,12 @@ func TestCodexAdapterAutoCreatesThreadWhenAppServerEmpty(t *testing.T) {
 	if adapter.threadID != "thread-fresh" {
 		t.Fatalf("adapter threadID = %q, want thread-fresh", adapter.threadID)
 	}
-	if saved, ok := adapter.threadStore.LoadThread(); !ok || saved != "thread-fresh" {
+	saved, savedOrigin, ok := adapter.threadStore.LoadThread()
+	if !ok || saved != "thread-fresh" {
 		t.Fatalf("cache thread = %q, %t, want thread-fresh, true", saved, ok)
+	}
+	if savedOrigin != codexThreadOriginAutoCreated {
+		t.Fatalf("cache origin = %q, want %q", savedOrigin, codexThreadOriginAutoCreated)
 	}
 
 	<-done
@@ -603,7 +607,7 @@ func TestCodexAdapterPersistsAutoCreatedThreadToCache(t *testing.T) {
 	if err := adapter.Deliver(context.Background(), event); err != nil {
 		t.Fatalf("Deliver(1) error = %v", err)
 	}
-	if saved, ok := adapter.threadStore.LoadThread(); !ok || saved != "thread-cached" {
+	if saved, _, ok := adapter.threadStore.LoadThread(); !ok || saved != "thread-cached" {
 		t.Fatalf("cache after first = %q, %t, want thread-cached, true", saved, ok)
 	}
 	if adapter.threadID != "thread-cached" {
@@ -802,14 +806,21 @@ func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
 
 	adapter.mu.Lock()
 	finalID := adapter.threadID
+	finalOrigin := adapter.threadOrigin
 	adapter.mu.Unlock()
 	if finalID != "thread-recovered" {
 		t.Fatalf("adapter threadID = %q, want thread-recovered", finalID)
 	}
+	if finalOrigin != codexThreadOriginAutoCreated {
+		t.Fatalf("adapter threadOrigin = %q, want %q", finalOrigin, codexThreadOriginAutoCreated)
+	}
 
-	saved, ok := adapter.threadStore.LoadThread()
+	saved, savedOrigin, ok := adapter.threadStore.LoadThread()
 	if !ok || saved != "thread-recovered" {
 		t.Fatalf("cache thread = %q, %t, want thread-recovered, true", saved, ok)
+	}
+	if savedOrigin != codexThreadOriginAutoCreated {
+		t.Fatalf("cache origin = %q, want %q", savedOrigin, codexThreadOriginAutoCreated)
 	}
 
 	_ = adapter.Close()

@@ -33,6 +33,26 @@ const (
 	codexRecoverSingleflightKey = "recover"
 )
 
+// codexThreadOrigin tracks where the currently cached thread id came from so
+// recovery can skip thread/resume on ids we know were created in-memory on
+// this app-server (auto-create) and therefore can never be on disk.
+type codexThreadOrigin string
+
+const (
+	// codexThreadOriginConfigured means the id was supplied by the operator
+	// via --thread or config. Resume is valid because the id usually comes
+	// from an interactive codex shell that shares $CODEX_HOME/rollouts.
+	codexThreadOriginConfigured codexThreadOrigin = "configured"
+	// codexThreadOriginCached means the id was loaded from the on-disk cache
+	// on startup. Treat like configured for recovery purposes because the
+	// cached id originated from a prior configured or auto-created thread.
+	codexThreadOriginCached codexThreadOrigin = "cached"
+	// codexThreadOriginAutoCreated means the id was minted by thread/start on
+	// this app-server. A later thread-not-found on this id must not try
+	// resume because no rollout ever existed for it.
+	codexThreadOriginAutoCreated codexThreadOrigin = "auto_created"
+)
+
 // --- Types ---
 
 // CodexAdapter delivers inbound Discord events to a running Codex app-server.
@@ -63,6 +83,7 @@ type CodexAdapter struct {
 	closeCh      chan struct{}
 	closeErr     error
 	closeOnce    sync.Once
+	threadOrigin codexThreadOrigin
 	recoverGroup singleflight.Group
 }
 
@@ -72,6 +93,7 @@ type CodexAdapter struct {
 type codexRecoverResult struct {
 	threadID     string
 	fallbackPath string
+	origin       codexThreadOrigin
 }
 
 type codexConnection interface {
@@ -236,6 +258,9 @@ func NewCodexAdapter(cfg CodexConfig, hookEnv HookEnv) (*CodexAdapter, error) {
 		turns:            make(map[string]codexMirrorTarget),
 		closeCh:          make(chan struct{}),
 	}
+	if cfg.ThreadID != "" {
+		adapter.threadOrigin = codexThreadOriginConfigured
+	}
 	adapter.threadStore = NewCodexThreadStore(hookEnv.HomeDir, adapter)
 
 	switch cfg.Transport {
@@ -267,7 +292,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 		return err
 	}
 
-	threadID, explicit, err := a.resolveThreadID(ctx)
+	threadID, explicit, origin, err := a.resolveThreadID(ctx)
 	if err != nil {
 		return err
 	}
@@ -277,7 +302,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 	formatted := formatCodexInput(event)
 	started, startErr := a.startTurn(ctx, threadID, formatted)
 	if startErr != nil && isThreadNotFoundError(startErr) {
-		recovered, recoverErr := a.recoverThreadSingleflight(ctx, threadID, explicit)
+		recovered, recoverErr := a.recoverThreadSingleflight(ctx, threadID, explicit, origin)
 		if recoverErr != nil {
 			a.auditDelivery(event, originalThreadID, "", "error", recovered.fallbackPath, recoverErr.Error())
 			return recoverErr
@@ -289,6 +314,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 			"fallback_path", fallbackPath,
 		)
 		threadID = recovered.threadID
+		origin = recovered.origin
 		started, startErr = a.startTurn(ctx, threadID, formatted)
 	}
 	if startErr != nil {
@@ -296,7 +322,7 @@ func (a *CodexAdapter) Deliver(ctx context.Context, event Event) error {
 		return startErr
 	}
 
-	if err := a.threadStore.SaveThread(threadID); err != nil {
+	if err := a.threadStore.SaveThread(threadID, origin); err != nil {
 		a.auditDelivery(event, originalThreadID, threadID, "error", fallbackPath, err.Error())
 		return fmt.Errorf("save codex thread: %w", err)
 	}
@@ -753,22 +779,29 @@ func (a *CodexAdapter) write(ctx context.Context, message codexRequestMessage) e
 
 // --- Thread Helpers ---
 
-func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, error) {
+func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, codexThreadOrigin, error) {
 	a.mu.Lock()
 	threadID := a.threadID
+	origin := a.threadOrigin
 	a.mu.Unlock()
 
 	if threadID != "" {
-		return threadID, true, nil
+		if origin == "" {
+			origin = codexThreadOriginConfigured
+		}
+		return threadID, true, origin, nil
 	}
-	if saved, ok := a.threadStore.LoadThread(); ok {
-		return saved, false, nil
+	if saved, savedOrigin, ok := a.threadStore.LoadThread(); ok {
+		if savedOrigin == "" {
+			savedOrigin = codexThreadOriginCached
+		}
+		return saved, false, savedOrigin, nil
 	}
 	id, err := a.threadStore.DiscoverActiveThread(ctx)
 	if err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
-	return id, false, nil
+	return id, false, codexThreadOriginCached, nil
 }
 
 // recoverThreadSingleflight serializes concurrent recovery attempts for the
@@ -778,8 +811,9 @@ func (a *CodexAdapter) resolveThreadID(ctx context.Context) (string, bool, error
 // to create a fresh thread and orphan the losing ones on the app-server.
 //
 // On success the adapter state is updated inside the singleflight callback
-// (threadID, cache file) so the waiting callers see a coherent view.
-func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedThreadID string, explicit bool) (codexRecoverResult, error) {
+// (threadID, threadOrigin, cache file) so the waiting callers see a coherent
+// view.
+func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedThreadID string, explicit bool, origin codexThreadOrigin) (codexRecoverResult, error) {
 	value, err, _ := a.recoverGroup.Do(codexRecoverSingleflightKey, func() (any, error) {
 		// re-check the in-memory thread id under the mutex: a prior winner
 		// of this singleflight slot may already have recovered and advanced
@@ -787,32 +821,34 @@ func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedT
 		// new id is the recovery result and no extra rpc is needed.
 		a.mu.Lock()
 		currentID := a.threadID
+		currentOrigin := a.threadOrigin
 		a.mu.Unlock()
 		if currentID != "" && currentID != requestedThreadID {
 			return codexRecoverResult{
 				threadID:     currentID,
 				fallbackPath: "cached",
+				origin:       currentOrigin,
 			}, nil
 		}
 
-		recoveredID, recoveredPath, recoverErr := a.recoverThread(ctx, requestedThreadID, explicit)
+		recoveredID, recoveredPath, recoveredOrigin, recoverErr := a.recoverThread(ctx, requestedThreadID, explicit, origin)
 		if recoverErr != nil {
 			return codexRecoverResult{fallbackPath: recoveredPath}, recoverErr
 		}
 
-		if explicit {
-			a.mu.Lock()
-			a.threadID = recoveredID
-			a.mu.Unlock()
-		}
+		a.mu.Lock()
+		a.threadID = recoveredID
+		a.threadOrigin = recoveredOrigin
+		a.mu.Unlock()
 
-		if saveErr := a.threadStore.SaveThread(recoveredID); saveErr != nil {
+		if saveErr := a.threadStore.SaveThread(recoveredID, recoveredOrigin); saveErr != nil {
 			return codexRecoverResult{fallbackPath: recoveredPath}, fmt.Errorf("save recovered codex thread: %w", saveErr)
 		}
 
 		return codexRecoverResult{
 			threadID:     recoveredID,
 			fallbackPath: recoveredPath,
+			origin:       recoveredOrigin,
 		}, nil
 	})
 	if err != nil {
@@ -827,15 +863,17 @@ func (a *CodexAdapter) recoverThreadSingleflight(ctx context.Context, requestedT
 // recoverThread attempts to recover from a thread-not-found error by
 // resuming the requested thread from on-disk rollouts, falling back to
 // discovery, then to auto-creation via thread/start. Returns the new
-// thread id and a label identifying which recovery path succeeded.
-func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID string, explicit bool) (string, string, error) {
-	// try thread/resume first when the caller supplied an explicit id: the
-	// app-server shares $CODEX_HOME/rollouts with the interactive codex shell,
-	// so an id that is unknown in memory may still be loadable from disk.
-	if explicit && requestedThreadID != "" {
+// thread id, a label identifying which fallback path succeeded, and the
+// origin describing where the recovered id came from.
+func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID string, explicit bool, origin codexThreadOrigin) (string, string, codexThreadOrigin, error) {
+	// try thread/resume first when the caller supplied an explicit id that
+	// could plausibly exist in $CODEX_HOME/rollouts. ids minted by a prior
+	// thread/start on this app-server (autoCreated) never have a rollout,
+	// so resume would always fail with thread not found and waste an rpc.
+	if explicit && requestedThreadID != "" && origin != codexThreadOriginAutoCreated {
 		resumedID, resumeErr := a.resumeThread(ctx, requestedThreadID)
 		if resumeErr == nil && resumedID != "" {
-			return resumedID, "resume", nil
+			return resumedID, "resume", codexThreadOriginConfigured, nil
 		}
 		if resumeErr != nil {
 			slog.Warn("codex thread resume failed, trying discovery",
@@ -848,11 +886,11 @@ func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID stri
 	// fall back to discovery against the connected app-server
 	discoveredThreadID, discoverErr := a.threadStore.DiscoverActiveThread(ctx)
 	if discoverErr == nil && discoveredThreadID != "" {
-		return discoveredThreadID, "discover", nil
+		return discoveredThreadID, "discover", codexThreadOriginCached, nil
 	}
 
 	if !a.autoCreateThread {
-		return "", "error", fmt.Errorf(
+		return "", "error", "", fmt.Errorf(
 			"codex app-server has no thread matching %q and auto-create is disabled (pass --auto-create-thread, "+
 				"start a conversation in the app-server first, or omit --thread to use discovery): %w",
 			requestedThreadID, discoverErr,
@@ -861,12 +899,12 @@ func (a *CodexAdapter) recoverThread(ctx context.Context, requestedThreadID stri
 
 	createdID, createErr := a.createThread(ctx)
 	if createErr != nil {
-		return "", "error", fmt.Errorf(
+		return "", "error", "", fmt.Errorf(
 			"rediscover codex thread after thread not found: %w (auto-create also failed: %s)",
 			discoverErr, createErr.Error(),
 		)
 	}
-	return createdID, "auto_create", nil
+	return createdID, "auto_create", codexThreadOriginAutoCreated, nil
 }
 
 // resumeThread loads a thread by id from the app-server's rollout store.

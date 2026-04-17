@@ -257,7 +257,7 @@ func TestCodexAdapterResolveThreadIDPaths(t *testing.T) {
 		threadStore: store,
 	}
 
-	id, explicit, err := adapter.resolveThreadID(context.Background())
+	id, explicit, _, err := adapter.resolveThreadID(context.Background())
 	if err != nil {
 		t.Fatalf("resolveThreadID() error = %v", err)
 	}
@@ -265,10 +265,10 @@ func TestCodexAdapterResolveThreadIDPaths(t *testing.T) {
 		t.Fatalf("resolveThreadID() = %q, %t", id, explicit)
 	}
 
-	if err := store.SaveThread("thread-saved"); err != nil {
+	if err := store.SaveThread("thread-saved", codexThreadOriginCached); err != nil {
 		t.Fatalf("SaveThread() error = %v", err)
 	}
-	id, explicit, err = adapter.resolveThreadID(context.Background())
+	id, explicit, _, err = adapter.resolveThreadID(context.Background())
 	if err != nil {
 		t.Fatalf("resolveThreadID() error = %v", err)
 	}
@@ -277,7 +277,7 @@ func TestCodexAdapterResolveThreadIDPaths(t *testing.T) {
 	}
 
 	adapter.threadID = "thread-explicit"
-	id, explicit, err = adapter.resolveThreadID(context.Background())
+	id, explicit, _, err = adapter.resolveThreadID(context.Background())
 	if err != nil {
 		t.Fatalf("resolveThreadID() error = %v", err)
 	}
@@ -1062,7 +1062,7 @@ func TestCodexAdapterDeliverRetriesSavedThreadAndMirrorsResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCodexAdapter() error = %v", err)
 	}
-	if err := adapter.threadStore.SaveThread("thread-stale"); err != nil {
+	if err := adapter.threadStore.SaveThread("thread-stale", codexThreadOriginCached); err != nil {
 		t.Fatalf("SaveThread() error = %v", err)
 	}
 
@@ -1225,7 +1225,7 @@ func TestCodexAdapterDeliverRetriesExplicitThreadAfterRediscovery(t *testing.T) 
 	if adapter.threadID != "thread-new" {
 		t.Fatalf("threadID = %q, want thread-new", adapter.threadID)
 	}
-	if savedThreadID, ok := adapter.threadStore.LoadThread(); !ok || savedThreadID != "thread-new" {
+	if savedThreadID, _, ok := adapter.threadStore.LoadThread(); !ok || savedThreadID != "thread-new" {
 		t.Fatalf("saved thread = %q, %t, want thread-new, true", savedThreadID, ok)
 	}
 
