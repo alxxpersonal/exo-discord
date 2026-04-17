@@ -292,6 +292,7 @@ func TestGatewayLifecycleAndMessageHandler(t *testing.T) {
 	t.Parallel()
 
 	upgrader := websocket.Upgrader{}
+	statusUpdated := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -362,7 +363,29 @@ func TestGatewayLifecycleAndMessageHandler(t *testing.T) {
 			return
 		}
 
-		_, _, _ = conn.ReadMessage()
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Errorf("SetReadDeadline() error = %v", err)
+			return
+		}
+
+		for {
+			var payload struct {
+				Op int `json:"op"`
+			}
+			if err := conn.ReadJSON(&payload); err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+					return
+				}
+				t.Errorf("ReadJSON() error = %v", err)
+				return
+			}
+			if payload.Op != 3 {
+				continue
+			}
+
+			statusUpdated <- struct{}{}
+			return
+		}
 	}))
 	defer server.Close()
 
@@ -416,6 +439,12 @@ func TestGatewayLifecycleAndMessageHandler(t *testing.T) {
 		ActivityText: "tests",
 	}); err != nil {
 		t.Fatalf("SetStatus() error = %v", err)
+	}
+
+	select {
+	case <-statusUpdated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for status update")
 	}
 
 	select {
