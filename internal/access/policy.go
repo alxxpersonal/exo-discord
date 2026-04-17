@@ -6,11 +6,12 @@ import "time"
 
 // Policy stores the local access policy.
 type Policy struct {
-	AllowedUserIDs    []string
-	AllowedChannelIDs []string
-	AllowedRoleIDs    []string
-	RequireMention    bool
-	Pairing           PairingPolicy
+	AllowedUserIDs      []string
+	AllowedChannelIDs   []string
+	AllowedRoleIDs      []string
+	NoMentionChannelIDs []string
+	RequireMention      bool
+	Pairing             PairingPolicy
 }
 
 // PairingPolicy stores DM pairing limits.

@@ -15,10 +15,11 @@ func loadPolicy(configPath string, statePath string) (Policy, error) {
 	}
 
 	return Policy{
-		AllowedUserIDs:    append([]string(nil), resolved.Config.AllowedUserIDs...),
-		AllowedChannelIDs: append([]string(nil), resolved.Config.AllowedChannelIDs...),
-		AllowedRoleIDs:    append([]string(nil), resolved.Config.AllowedRoleIDs...),
-		RequireMention:    resolved.Config.RequireMention,
+		AllowedUserIDs:      append([]string(nil), resolved.Config.AllowedUserIDs...),
+		AllowedChannelIDs:   append([]string(nil), resolved.Config.AllowedChannelIDs...),
+		AllowedRoleIDs:      append([]string(nil), resolved.Config.AllowedRoleIDs...),
+		NoMentionChannelIDs: append([]string(nil), resolved.Config.NoMentionChannelIDs...),
+		RequireMention:      resolved.Config.RequireMention,
 		Pairing: PairingPolicy{
 			Enabled:     resolved.Config.Pairing.Enabled,
 			CodeTTL:     resolved.Config.Pairing.CodeTTL.Duration(),

@@ -172,10 +172,11 @@ type Config struct {
 	BotToken          string         `toml:"bot_token"`
 	MCPEnabled        bool           `toml:"mcp_enabled"`
 	CLIEnabled        bool           `toml:"cli_enabled"`
-	RequireMention    bool           `toml:"require_mention"`
-	AllowedUserIDs    []string       `toml:"allowed_user_ids"`
-	AllowedChannelIDs []string       `toml:"allowed_channel_ids"`
-	AllowedRoleIDs    []string       `toml:"allowed_role_ids"`
+	RequireMention       bool     `toml:"require_mention"`
+	AllowedUserIDs       []string `toml:"allowed_user_ids"`
+	AllowedChannelIDs    []string `toml:"allowed_channel_ids"`
+	AllowedRoleIDs       []string `toml:"allowed_role_ids"`
+	NoMentionChannelIDs  []string `toml:"no_mention_channel_ids"`
 	Pairing           PairingConfig  `toml:"pairing"`
 	Hook              HookConfig     `toml:"hook"`
 	MCP               MCPConfig      `toml:"mcp"`

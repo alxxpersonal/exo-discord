@@ -79,10 +79,11 @@ func removeValue(values []string, value string) []string {
 
 func accessPolicyFromConfig(cfg config.Config) access.Policy {
 	return access.Policy{
-		AllowedUserIDs:    append([]string(nil), cfg.AllowedUserIDs...),
-		AllowedChannelIDs: append([]string(nil), cfg.AllowedChannelIDs...),
-		AllowedRoleIDs:    append([]string(nil), cfg.AllowedRoleIDs...),
-		RequireMention:    cfg.RequireMention,
+		AllowedUserIDs:      append([]string(nil), cfg.AllowedUserIDs...),
+		AllowedChannelIDs:   append([]string(nil), cfg.AllowedChannelIDs...),
+		AllowedRoleIDs:      append([]string(nil), cfg.AllowedRoleIDs...),
+		NoMentionChannelIDs: append([]string(nil), cfg.NoMentionChannelIDs...),
+		RequireMention:      cfg.RequireMention,
 		Pairing: access.PairingPolicy{
 			Enabled:     cfg.Pairing.Enabled,
 			CodeTTL:     cfg.Pairing.CodeTTL.Duration(),

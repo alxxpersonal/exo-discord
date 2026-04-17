@@ -258,7 +258,7 @@ func (m *Manager) evaluateGuildLocked(ctx MessageContext) Decision {
 	if len(m.policy.AllowedRoleIDs) > 0 && !hasAny(ctx.RoleIDs, m.policy.AllowedRoleIDs) {
 		return Decision{Action: ActionDrop, Reason: "role_not_allowlisted"}
 	}
-	if m.policy.RequireMention && !ctx.MentionedBot && !ctx.RepliedToBot {
+	if m.policy.RequireMention && !ctx.MentionedBot && !ctx.RepliedToBot && !slices.Contains(m.policy.NoMentionChannelIDs, channelID) {
 		return Decision{Action: ActionDrop, Reason: "mention_required"}
 	}
 	return Decision{Action: ActionAllow, Reason: "allowlisted_channel"}
