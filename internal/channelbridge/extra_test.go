@@ -540,6 +540,93 @@ func TestCodexAdapterRequestWriteError(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterInitializeConnectionSendsHandshake(t *testing.T) {
+	t.Parallel()
+
+	response, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result":  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	conn := &scriptedCodexConnection{
+		reads: [][]byte{response},
+	}
+	adapter := &CodexAdapter{}
+	if err := adapter.initializeConnection(context.Background(), conn); err != nil {
+		t.Fatalf("initializeConnection() error = %v", err)
+	}
+
+	if len(conn.writes) != 2 {
+		t.Fatalf("writes = %d, want 2", len(conn.writes))
+	}
+
+	var initializeRequest codexRequestMessage
+	if err := json.Unmarshal(conn.writes[0], &initializeRequest); err != nil {
+		t.Fatalf("Unmarshal(initialize) error = %v", err)
+	}
+	if initializeRequest.Method != "initialize" {
+		t.Fatalf("first method = %q, want initialize", initializeRequest.Method)
+	}
+
+	var initializedRequest codexRequestMessage
+	if err := json.Unmarshal(conn.writes[1], &initializedRequest); err != nil {
+		t.Fatalf("Unmarshal(initialized) error = %v", err)
+	}
+	if initializedRequest.Method != "initialized" {
+		t.Fatalf("second method = %q, want initialized", initializedRequest.Method)
+	}
+}
+
+func TestCodexAdapterNotifyWritesToActiveConnection(t *testing.T) {
+	t.Parallel()
+
+	conn := &fakeCodexConnection{}
+	adapter := &CodexAdapter{conn: conn}
+	if err := adapter.notify(context.Background(), "initialized", codexInitializedParams{}); err != nil {
+		t.Fatalf("notify() error = %v", err)
+	}
+
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var request codexRequestMessage
+	if err := json.Unmarshal(conn.writes[0], &request); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if request.Method != "initialized" {
+		t.Fatalf("method = %q, want initialized", request.Method)
+	}
+}
+
+func TestCodexAdapterWaitForReconnectDelayTimer(t *testing.T) {
+	t.Parallel()
+
+	adapter := &CodexAdapter{closeCh: make(chan struct{})}
+	if err := adapter.waitForReconnectDelay(context.Background(), time.Millisecond); err != nil {
+		t.Fatalf("waitForReconnectDelay() error = %v", err)
+	}
+}
+
+func TestCodexAdapterWaitForReconnectDelayReturnsCanceledWhenClosed(t *testing.T) {
+	t.Parallel()
+
+	closeCh := make(chan struct{})
+	close(closeCh)
+	adapter := &CodexAdapter{closeCh: closeCh}
+
+	if err := adapter.waitForReconnectDelay(context.Background(), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForReconnectDelay(0) error = %v, want context.Canceled", err)
+	}
+	if err := adapter.waitForReconnectDelay(context.Background(), time.Millisecond); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForReconnectDelay(timer) error = %v, want context.Canceled", err)
+	}
+}
+
 func TestCodexAdapterEnsureConnectedReconnectsAfterInitializeFailure(t *testing.T) {
 	t.Parallel()
 

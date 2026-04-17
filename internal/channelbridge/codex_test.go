@@ -785,6 +785,8 @@ func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
 	const concurrentDelivers = 3
 
 	var (
+		initializeCalls     atomic.Int32
+		initializedCalls    atomic.Int32
 		writeMu             sync.Mutex
 		threadStartCalls    atomic.Int32
 		threadResumeCalls   atomic.Int32
@@ -831,9 +833,12 @@ func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
 
 			switch method {
 			case "initialize":
+				if initializeCalls.Add(1) > 1 {
+					t.Errorf("initialize called more than once, want single cold-start handshake")
+				}
 				writeResponse(id, map[string]any{})
 			case "initialized":
-				// notification, no reply
+				initializedCalls.Add(1)
 			case "turn/start":
 				params, _ := request["params"].(map[string]any)
 				threadID, _ := params["threadId"].(string)
@@ -889,14 +894,6 @@ func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
 		err: errors.New("no codex threads were returned by thread/list"),
 	})
 
-	// warm the adapter's single connection before fanning out so the 3
-	// concurrent Delivers do not race to open multiple sockets against a
-	// mock server that only Accepts once. the recovery singleflight is the
-	// subject of this test, not the connect handshake.
-	if err := adapter.ensureConnected(context.Background()); err != nil {
-		t.Fatalf("ensureConnected() error = %v", err)
-	}
-
 	// release the stale turn/start responses once all concurrent callers
 	// have sent their initial turn/start request.
 	go func() {
@@ -942,6 +939,12 @@ func TestCodexAdapterConcurrentDeliverySerializesRecovery(t *testing.T) {
 
 	if got := threadStartCalls.Load(); got != 1 {
 		t.Fatalf("thread/start calls = %d, want exactly 1", got)
+	}
+	if got := initializeCalls.Load(); got != 1 {
+		t.Fatalf("initialize calls = %d, want exactly 1", got)
+	}
+	if got := initializedCalls.Load(); got != 1 {
+		t.Fatalf("initialized calls = %d, want exactly 1", got)
 	}
 	if got := staleTurnStartCalls.Load(); got != concurrentDelivers {
 		t.Fatalf("stale turn/start calls = %d, want %d", got, concurrentDelivers)

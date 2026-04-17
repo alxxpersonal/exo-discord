@@ -77,6 +77,9 @@ type CodexAdapter struct {
 
 	mu           sync.Mutex
 	conn         codexConnection
+	connecting   bool
+	connectWait  chan struct{}
+	connectErr   error
 	pending      map[int64]chan codexResponseMessage
 	turns        map[string]codexMirrorTarget
 	nextID       int64
@@ -414,14 +417,57 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
 		return context.Canceled
 	}
 
-	a.mu.Lock()
-	conn := a.conn
-	closeErr := a.closeErr
-	a.mu.Unlock()
+	for {
+		a.mu.Lock()
+		if a.conn != nil {
+			a.mu.Unlock()
+			return nil
+		}
+		closeErr := a.closeErr
+		if a.connecting {
+			waitCh := a.connectWait
+			a.mu.Unlock()
 
-	if conn != nil {
-		return nil
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-a.closeCh:
+				return context.Canceled
+			case <-waitCh:
+			}
+
+			a.mu.Lock()
+			conn := a.conn
+			connectErr := a.connectErr
+			a.mu.Unlock()
+			if conn != nil {
+				return nil
+			}
+			if connectErr != nil {
+				return connectErr
+			}
+			continue
+		}
+
+		waitCh := make(chan struct{})
+		a.connecting = true
+		a.connectWait = waitCh
+		a.connectErr = nil
+		a.mu.Unlock()
+
+		err := a.connectWithRecovery(ctx, closeErr)
+
+		a.mu.Lock()
+		a.connecting = false
+		a.connectWait = nil
+		a.connectErr = err
+		close(waitCh)
+		a.mu.Unlock()
+		return err
 	}
+}
+
+func (a *CodexAdapter) connectWithRecovery(ctx context.Context, closeErr error) error {
 	if closeErr == nil {
 		return a.connectAndInitialize(ctx)
 	}
@@ -446,10 +492,18 @@ func (a *CodexAdapter) ensureConnected(ctx context.Context) error {
 	return lastErr
 }
 
-func (a *CodexAdapter) connectAndInitialize(ctx context.Context) (err error) {
+func (a *CodexAdapter) connectAndInitialize(ctx context.Context) error {
 	conn, err := a.connect(ctx)
 	if err != nil {
 		return err
+	}
+	if err := a.initializeConnection(ctx, conn); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if a.isShuttingDown() {
+		_ = conn.Close()
+		return context.Canceled
 	}
 
 	a.mu.Lock()
@@ -463,20 +517,11 @@ func (a *CodexAdapter) connectAndInitialize(ctx context.Context) (err error) {
 	a.mu.Unlock()
 
 	go a.readLoop(a.readLoopContext())
+	return nil
+}
 
-	defer func() {
-		if err == nil {
-			return
-		}
-		a.mu.Lock()
-		if a.conn == conn {
-			a.conn = nil
-		}
-		a.mu.Unlock()
-		_ = conn.Close()
-	}()
-
-	if err = a.request(ctx, "initialize", codexInitializeParams{
+func (a *CodexAdapter) initializeConnection(ctx context.Context, conn codexConnection) error {
+	if err := a.requestConnection(ctx, conn, "initialize", codexInitializeParams{
 		ClientInfo: codexClientInfo{
 			Name:    "exo-discord",
 			Title:   "exo-discord",
@@ -486,10 +531,55 @@ func (a *CodexAdapter) connectAndInitialize(ctx context.Context) (err error) {
 	}, nil); err != nil {
 		return fmt.Errorf("initialize codex app-server: %w", err)
 	}
-	if err = a.notify(ctx, "initialized", codexInitializedParams{}); err != nil {
+	if err := a.notifyConnection(ctx, conn, "initialized", codexInitializedParams{}); err != nil {
 		return fmt.Errorf("notify codex app-server initialized: %w", err)
 	}
 	return nil
+}
+
+func (a *CodexAdapter) requestConnection(ctx context.Context, conn codexConnection, method string, params any, result any) error {
+	id := atomic.AddInt64(&a.nextID, 1)
+	if err := a.writeMessage(ctx, conn, codexRequestMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  method,
+		Params:  params,
+	}); err != nil {
+		return err
+	}
+
+	for {
+		data, err := conn.ReadJSON(ctx)
+		if err != nil {
+			return fmt.Errorf("read codex response %s: %w", method, err)
+		}
+
+		var response codexResponseMessage
+		if err := json.Unmarshal(data, &response); err != nil {
+			continue
+		}
+		if response.Method != "" || response.ID != id {
+			continue
+		}
+		if response.Error != nil {
+			return fmt.Errorf("%s failed: %s", method, response.Error.Message)
+		}
+		if result == nil || len(response.Result) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(response.Result, result); err != nil {
+			return fmt.Errorf("decode %s response: %w", method, err)
+		}
+		return nil
+	}
+}
+
+func (a *CodexAdapter) notifyConnection(ctx context.Context, conn codexConnection, method string, params any) error {
+	return a.writeMessage(ctx, conn, codexRequestMessage{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+	})
 }
 
 func (a *CodexAdapter) connect(ctx context.Context) (codexConnection, error) {
@@ -766,7 +856,10 @@ func (a *CodexAdapter) write(ctx context.Context, message codexRequestMessage) e
 	if conn == nil {
 		return fmt.Errorf("codex connection is not available")
 	}
+	return a.writeMessage(ctx, conn, message)
+}
 
+func (a *CodexAdapter) writeMessage(ctx context.Context, conn codexConnection, message codexRequestMessage) error {
 	line, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("marshal codex request %s: %w", message.Method, err)
