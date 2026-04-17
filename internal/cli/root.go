@@ -31,6 +31,24 @@ type Environment struct {
 	NewMCPServer   func(discordpkg.Session) mcpServer
 	ListenRunner   listenRunner
 	BotModeRunner  botModeRunner
+	OAuthOverride  oauthEndpointOverride
+	OAuthAPIBase   string
+	// OAuthStateSeed is an optional test hook to force a deterministic oauth state.
+	OAuthStateSeed string
+	// UserIDOverride forces a specific user id when building a user-install session.
+	// Populated by the root --as-user flag or EXO_DISCORD_USER_ID env var via userIDRef.
+	UserIDOverride string
+	// LookupEnv overrides os.LookupEnv for tests. When nil, os.LookupEnv is used.
+	LookupEnv func(string) (string, bool)
+	// userIDRef is set by NewRootCommand so session factory sees the parsed --as-user value.
+	userIDRef *string
+}
+
+// oauthEndpointOverride lets tests redirect Discord oauth endpoints to a local server.
+type oauthEndpointOverride struct {
+	AuthorizeBase string
+	TokenBase     string
+	RevokeBase    string
 }
 
 // --- Internal Types ---
@@ -101,7 +119,9 @@ func (env Environment) withDefaults() Environment {
 		env.DiscoverConfig = config.DiscoverFrom
 	}
 	if env.NewSession == nil {
-		env.NewSession = defaultSessionFactory
+		env.NewSession = func(resolved config.ResolvedConfig) (discordpkg.Session, error) {
+			return defaultSessionFactory(env, resolved)
+		}
 	}
 	if env.NewMCPServer == nil {
 		env.NewMCPServer = func(session discordpkg.Session) mcpServer {
@@ -134,6 +154,12 @@ func NewRootCommand(env Environment) *cobra.Command {
 	root.SetOut(env.Stdout)
 	root.SetErr(env.Stderr)
 
+	// --as-user persistent flag writes into a shared pointer so subcommand closures
+	// built below can observe the parsed value through env.userIDRef.
+	userIDHolder := env.UserIDOverride
+	env.userIDRef = &userIDHolder
+	root.PersistentFlags().StringVar(env.userIDRef, "as-user", userIDHolder, "user id to use when multiple user-install tokens are stored (overrides EXO_DISCORD_USER_ID)")
+
 	root.AddCommand(newInitCommand(env))
 	root.AddCommand(newConfigureCommand(env))
 	root.AddCommand(newDoctorCommand(env))
@@ -144,6 +170,7 @@ func NewRootCommand(env Environment) *cobra.Command {
 	root.AddCommand(newPairCommand(env))
 	root.AddCommand(newMCPCommand(env))
 	root.AddCommand(newUserInstallModeCommand())
+	root.AddCommand(newAuthCommand(env))
 
 	return root
 }
@@ -170,9 +197,9 @@ func (env Environment) commandContext() context.Context {
 
 // --- Session Helpers ---
 
-func defaultSessionFactory(resolved config.ResolvedConfig) (discordpkg.Session, error) {
+func defaultSessionFactory(env Environment, resolved config.ResolvedConfig) (discordpkg.Session, error) {
 	if resolved.Config.Mode == config.ModeUserInstall {
-		return nil, errors.New("user_install mode is not implemented")
+		return buildUserInstallSession(env, resolved)
 	}
 
 	token := strings.TrimSpace(resolved.Config.BotToken)

@@ -16,6 +16,7 @@ const (
 	accessStateName   = "access.json"
 	auditLogName      = "audit.log"
 	inboxDirName      = "inbox"
+	oauthDirName      = "oauth"
 )
 
 // --- Path Helpers ---
@@ -48,6 +49,11 @@ func AuditLogPath(homeDir string) string {
 // InboxDirPath returns the inbox directory path.
 func InboxDirPath(homeDir string) string {
 	return filepath.Join(HomeStateDir(homeDir), inboxDirName)
+}
+
+// OAuthDirPath returns the oauth token directory path.
+func OAuthDirPath(homeDir string) string {
+	return filepath.Join(HomeStateDir(homeDir), oauthDirName)
 }
 
 // --- Mode Types ---
@@ -171,6 +177,18 @@ type Config struct {
 	Downloads         DownloadConfig `toml:"downloads"`
 	Logging           LoggingConfig  `toml:"logging"`
 	Status            StatusConfig   `toml:"status"`
+	OAuth             OAuthConfig    `toml:"oauth"`
+}
+
+// OAuthConfig stores the Discord oauth 2.0 client configuration for user-install mode.
+type OAuthConfig struct {
+	ClientID     string   `toml:"client_id"`
+	ClientSecret string   `toml:"client_secret"`
+	RedirectURI  string   `toml:"redirect_uri"`
+	Scopes       []string `toml:"scopes"`
+	// ForceConsent appends `prompt=consent` to the authorize URL so Discord always
+	// re-asks the user for authorization. Defaults to false.
+	ForceConsent bool `toml:"force_consent"`
 }
 
 // PairingConfig stores DM pairing settings.
@@ -234,6 +252,7 @@ type ResolvedConfig struct {
 	AccessStatePath string
 	AuditLogPath    string
 	InboxDirPath    string
+	OAuthDirPath    string
 }
 
 // --- Defaults ---
@@ -271,6 +290,9 @@ func defaultConfig(homeDir string) Config {
 		},
 		Status: StatusConfig{
 			Presence: PresenceOnline,
+		},
+		OAuth: OAuthConfig{
+			Scopes: []string{"identify", "guilds"},
 		},
 	}
 }
@@ -388,6 +410,21 @@ func (c Config) Validate() error {
 	}
 	if c.Hook.Kind == HookKindStdio && len(c.Hook.Stdio.Command) == 0 {
 		return fmt.Errorf("hook stdio command must not be empty")
+	}
+
+	if c.Mode == ModeUserInstall {
+		if strings.TrimSpace(c.OAuth.ClientID) == "" {
+			return fmt.Errorf("oauth client_id is required for user_install mode")
+		}
+		if strings.TrimSpace(c.OAuth.ClientSecret) == "" {
+			return fmt.Errorf("oauth client_secret is required for user_install mode")
+		}
+		if strings.TrimSpace(c.OAuth.RedirectURI) == "" {
+			return fmt.Errorf("oauth redirect_uri is required for user_install mode")
+		}
+		if len(c.OAuth.Scopes) == 0 {
+			return fmt.Errorf("oauth scopes must not be empty for user_install mode")
+		}
 	}
 
 	return nil

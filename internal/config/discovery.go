@@ -104,5 +104,6 @@ func loadResolved(configPath string, homeDir string) (ResolvedConfig, error) {
 		AccessStatePath: filepath.Join(stateDir, accessStateName),
 		AuditLogPath:    filepath.Join(stateDir, auditLogName),
 		InboxDirPath:    cfg.Downloads.Dir,
+		OAuthDirPath:    filepath.Join(stateDir, oauthDirName),
 	}, nil
 }
