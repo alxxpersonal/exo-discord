@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
+	"github.com/alxxpersonal/exo-discord/internal/manage/colors"
 )
 
 // --- Apply Types ---
@@ -78,7 +79,7 @@ func BuildPlan(ctx context.Context, manager discord.Manager, spec Spec) (Plan, e
 		return Plan{}, err
 	}
 
-	return Diff(spec, state), nil
+	return Diff(spec, state)
 }
 
 // PreparePlan filters plan changes according to apply options.
@@ -151,7 +152,11 @@ func newApplyContext(ctx context.Context, manager discord.Manager, spec Spec, st
 
 func (a *applyContext) apply(options ApplyOptions) (Plan, error) {
 	if !options.DeleteExtras {
-		a.plan.Warnings = skippedDeleteWarnings(a.spec, *a.state)
+		warnings, err := skippedDeleteWarnings(a.spec, *a.state)
+		if err != nil {
+			return a.plan, err
+		}
+		a.plan.Warnings = warnings
 	}
 
 	if err := a.applyRoles(); err != nil {
@@ -182,7 +187,10 @@ func (a *applyContext) applyRoles() error {
 	}
 
 	for _, role := range a.spec.Roles {
-		color, hasColor := parseHexColor(role.Color)
+		color, err := colors.ParseOptionalHexColor(role.Color)
+		if err != nil {
+			return fmt.Errorf("parse role color for %q: %w", role.Name, err)
+		}
 		current, ok := roleIndex[role.Name]
 		if !ok {
 			req := discord.RoleCreateRequest{
@@ -191,8 +199,8 @@ func (a *applyContext) applyRoles() error {
 				Hoist:       boolPointer(role.Hoist),
 				Mentionable: boolPointer(role.Mentionable),
 			}
-			if hasColor {
-				req.Color = intPointer(color)
+			if color != nil {
+				req.Color = color
 			}
 
 			created, err := a.manager.CreateRole(a.ctx, req)
@@ -215,8 +223,8 @@ func (a *applyContext) applyRoles() error {
 			RoleID:  current.ID,
 		}
 		fields := make([]string, 0, 3)
-		if hasColor && current.Color != color {
-			req.Color = intPointer(color)
+		if color != nil && current.Color != *color {
+			req.Color = color
 			fields = append(fields, "color")
 		}
 		if current.Hoist != role.Hoist {
@@ -567,8 +575,12 @@ func (a *applyContext) removeRole(roleID string) {
 	a.state.Roles = filtered
 }
 
-func skippedDeleteWarnings(spec Spec, state State) []string {
-	return PreparePlan(Diff(spec, state), ApplyOptions{}).Warnings
+func skippedDeleteWarnings(spec Spec, state State) ([]string, error) {
+	plan, err := Diff(spec, state)
+	if err != nil {
+		return nil, err
+	}
+	return PreparePlan(plan, ApplyOptions{}).Warnings, nil
 }
 
 func summarizeChanges(changes []Change) string {

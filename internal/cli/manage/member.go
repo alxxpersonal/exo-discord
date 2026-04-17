@@ -74,13 +74,19 @@ func newMemberGetCommand(env Environment) *cobra.Command {
 }
 
 func newMemberKickCommand(env Environment) *cobra.Command {
-	var guildID string
+	var (
+		guildID string
+		yes     bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "kick <user-id>",
 		Short: "Kick a member from a guild",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireYes(yes, "member kick"); err != nil {
+				return err
+			}
 			return withManager(env, func(ctx context.Context, manager discord.Manager) error {
 				if err := manager.KickMember(ctx, discord.GuildUserRequest{
 					GuildID: guildID,
@@ -98,6 +104,7 @@ func newMemberKickCommand(env Environment) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&guildID, "guild", "", "discord guild id")
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm member kick")
 	markRequired(cmd, "guild")
 	return cmd
 }

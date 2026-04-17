@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
@@ -161,7 +162,7 @@ func TestDiffMatchesGoldenPlan(t *testing.T) {
 		t.Fatalf("LoadSpec() error = %v", err)
 	}
 
-	plan := Diff(spec, State{
+	plan, err := Diff(spec, State{
 		GuildID: "guild-1",
 		Roles: []discord.GuildRole{
 			{ID: "role-1", Name: "admin", Color: 0, Hoist: false, Mentionable: false},
@@ -172,6 +173,9 @@ func TestDiffMatchesGoldenPlan(t *testing.T) {
 			{ID: "chan-2", Name: "obsolete", Type: "text", Topic: ""},
 		},
 	})
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
 
 	got, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
@@ -205,6 +209,21 @@ func TestBuildPlanLoadsState(t *testing.T) {
 	}
 	if plan.GuildID != "guild-1" {
 		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+func TestBuildPlanRejectsInvalidRoleColor(t *testing.T) {
+	t.Parallel()
+
+	manager := &fakeManager{}
+	_, err := BuildPlan(context.Background(), manager, Spec{
+		Guild: GuildSpec{ID: "guild-1"},
+		Roles: []RoleSpec{
+			{Name: "admin", Color: "#12"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `parse role color for "admin": invalid color "#12"`) {
+		t.Fatalf("BuildPlan() error = %v", err)
 	}
 }
 
@@ -363,5 +382,87 @@ func TestApplyRollbackFailureMatchesGolden(t *testing.T) {
 
 	if string(got) != string(want) {
 		t.Fatalf("golden mismatch\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+func TestPreparePlanFiltersDeleteChanges(t *testing.T) {
+	t.Parallel()
+
+	plan := PreparePlan(Plan{
+		GuildID: "guild-1",
+		Changes: []Change{
+			{Action: "create", Kind: "role", Name: "admin"},
+			{Action: "delete", Kind: "channel", Name: "obsolete"},
+			{Action: "delete", Kind: "role", Name: "old"},
+		},
+	}, ApplyOptions{})
+
+	if len(plan.Changes) != 1 || plan.Changes[0].Name != "admin" {
+		t.Fatalf("plan.Changes = %#v", plan.Changes)
+	}
+	if len(plan.Warnings) != 2 {
+		t.Fatalf("plan.Warnings = %#v", plan.Warnings)
+	}
+}
+
+func TestSpecFromStateIncludesSupportedFields(t *testing.T) {
+	t.Parallel()
+
+	spec := specFromState(State{
+		GuildID: "guild-1",
+		Roles: []discord.GuildRole{
+			{ID: "role-1", Name: "@everyone"},
+			{ID: "role-2", Name: "admin", Color: 0x112233, Hoist: true, Mentionable: true},
+		},
+		Channels: []discord.GuildChannel{
+			{ID: "cat-1", Name: "team", Type: "category"},
+			{
+				ID:       "chan-1",
+				Name:     "general",
+				Type:     "text",
+				Topic:    "hello",
+				ParentID: "cat-1",
+				PermissionOverwrites: []discord.PermissionOverwrite{
+					{TargetID: "role-2", TargetType: "role", AllowNames: []string{"send_messages", "view_channel"}},
+				},
+			},
+		},
+	})
+
+	if len(spec.Roles) != 1 || spec.Roles[0].Color != "#112233" {
+		t.Fatalf("spec.Roles = %#v", spec.Roles)
+	}
+	if len(spec.Categories) != 1 || spec.Categories[0].Name != "team" {
+		t.Fatalf("spec.Categories = %#v", spec.Categories)
+	}
+	if len(spec.Channels) != 1 || spec.Channels[0].Parent != "team" || len(spec.Channels[0].Overwrites) != 1 {
+		t.Fatalf("spec.Channels = %#v", spec.Channels)
+	}
+}
+
+func TestApplyErrorFormatting(t *testing.T) {
+	t.Parallel()
+
+	successfulRollback := (&ApplyError{
+		Cause: errors.New("apply failed"),
+		Applied: Plan{
+			Changes: []Change{{Action: "create", Kind: "role", Name: "admin"}},
+		},
+		Rollback: Plan{
+			Changes: []Change{{Action: "delete", Kind: "role", Name: "admin"}},
+		},
+	}).Error()
+	if !strings.Contains(successfulRollback, "rollback succeeded") {
+		t.Fatalf("ApplyError() = %q", successfulRollback)
+	}
+
+	failedRollback := (&ApplyError{
+		Cause:         errors.New("apply failed"),
+		Applied:       Plan{Changes: []Change{{Action: "create", Kind: "role", Name: "admin"}}},
+		RollbackErr:   errors.New("rollback failed"),
+		ManualCleanup: true,
+	}).Error()
+	if !strings.Contains(failedRollback, "manual cleanup needed") {
+		t.Fatalf("ApplyError() = %q", failedRollback)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -514,21 +515,30 @@ func (m *DiscordGoManager) BulkDeleteMessages(ctx context.Context, req discord.B
 		}
 	}
 
+	deletedIDs := make([]string, 0, len(messageIDs))
 	for _, chunk := range chunkStrings(messageIDs, 100) {
 		if len(chunk) == 1 {
 			if err := m.session.ChannelMessageDelete(req.ChannelID, chunk[0], discordgo.WithContext(ctx)); err != nil {
-				return discord.BulkDeleteResult{}, fmt.Errorf("failed to delete message %s: %w", chunk[0], err)
+				return discord.BulkDeleteResult{
+					Deleted:    len(deletedIDs),
+					MessageIDs: deletedIDs,
+				}, fmt.Errorf("failed to delete message %s: %w", chunk[0], err)
 			}
+			deletedIDs = append(deletedIDs, chunk[0])
 			continue
 		}
 		if err := m.session.ChannelMessagesBulkDelete(req.ChannelID, chunk, discordgo.WithContext(ctx)); err != nil {
-			return discord.BulkDeleteResult{}, fmt.Errorf("failed to bulk delete messages: %w", err)
+			return discord.BulkDeleteResult{
+				Deleted:    len(deletedIDs),
+				MessageIDs: deletedIDs,
+			}, fmt.Errorf("failed to bulk delete messages after deleting %d messages: %w", len(deletedIDs), err)
 		}
+		deletedIDs = append(deletedIDs, chunk...)
 	}
 
 	return discord.BulkDeleteResult{
-		Deleted:    len(messageIDs),
-		MessageIDs: messageIDs,
+		Deleted:    len(deletedIDs),
+		MessageIDs: deletedIDs,
 	}, nil
 }
 
@@ -683,8 +693,12 @@ func (m *DiscordGoManager) REST(ctx context.Context, req discord.RESTRequest) (d
 		}
 	}
 
-	url := normalizeRESTPath(path)
-	payload, err := m.session.Request(method, url, body, discordgo.WithContext(ctx))
+	requestURL, err := normalizeRESTPath(path)
+	if err != nil {
+		return discord.RESTResponse{}, err
+	}
+
+	payload, err := m.session.Request(method, requestURL, body, discordgo.WithContext(ctx))
 	if err != nil {
 		return discord.RESTResponse{}, fmt.Errorf("failed to execute rest request: %w", err)
 	}
@@ -945,11 +959,30 @@ func parseButtonStyle(value string) discordgo.ButtonStyle {
 	}
 }
 
-func normalizeRESTPath(path string) string {
+func normalizeRESTPath(path string) (string, error) {
 	if strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://") {
-		return path
+		parsed, err := url.Parse(path)
+		if err != nil {
+			return "", fmt.Errorf("parse rest url: %w", err)
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if host == "" {
+			return "", fmt.Errorf("rest url host must not be empty")
+		}
+		if !isAllowedRESTHost(host) {
+			return "", fmt.Errorf("rest host %q is not allowed", host)
+		}
+		return parsed.String(), nil
 	}
-	return discordgo.EndpointAPI + strings.TrimPrefix(path, "/")
+	return discordgo.EndpointAPI + strings.TrimPrefix(path, "/"), nil
+}
+
+func isAllowedRESTHost(host string) bool {
+	switch host {
+	case "discord.com", "discordapp.com":
+		return true
+	}
+	return strings.HasSuffix(host, ".discord.com") || strings.HasSuffix(host, ".discordapp.com")
 }
 
 func permissionBitsFromNames(names []string) (int64, error) {

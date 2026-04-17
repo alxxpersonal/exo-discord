@@ -11,6 +11,11 @@ import (
 // --- Schema Types ---
 
 // Spec stores the declarative Discord guild specification.
+//
+// Current scaffold limitations:
+// - role position and permissions bitfields are not modeled
+// - channel nsfw and rate limits are not modeled
+// - channel and role renames are treated as delete and recreate operations
 type Spec struct {
 	Guild      GuildSpec     `json:"guild" yaml:"guild"`
 	Roles      []RoleSpec    `json:"roles,omitempty" yaml:"roles,omitempty"`
@@ -25,6 +30,8 @@ type GuildSpec struct {
 }
 
 // RoleSpec stores declarative role state.
+//
+// RoleSpec intentionally excludes role position and permissions bitfields.
 type RoleSpec struct {
 	Name        string `json:"name" yaml:"name"`
 	Color       string `json:"color,omitempty" yaml:"color,omitempty"`
@@ -33,6 +40,9 @@ type RoleSpec struct {
 }
 
 // ChannelSpec stores declarative channel state.
+//
+// ChannelSpec intentionally excludes nsfw and rate limit settings. Matching is
+// name-based, so renaming a channel is modeled as delete and recreate.
 type ChannelSpec struct {
 	Name       string          `json:"name" yaml:"name"`
 	Type       string          `json:"type,omitempty" yaml:"type,omitempty"`

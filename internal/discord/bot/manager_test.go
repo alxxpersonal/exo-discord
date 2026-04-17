@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -299,8 +300,9 @@ func TestDiscordGoManagerHelpersAndSubscription(t *testing.T) {
 	if parseButtonStyle("danger") != discordgo.DangerButton {
 		t.Fatal("parseButtonStyle() != danger")
 	}
-	if normalizeRESTPath("/guilds/guild-1") != discordgo.EndpointAPI+"guilds/guild-1" {
-		t.Fatalf("normalizeRESTPath() = %q", normalizeRESTPath("/guilds/guild-1"))
+	normalizedPath, err := normalizeRESTPath("/guilds/guild-1")
+	if err != nil || normalizedPath != discordgo.EndpointAPI+"guilds/guild-1" {
+		t.Fatalf("normalizeRESTPath() path=%q err=%v", normalizedPath, err)
 	}
 	bits, err := permissionBitsFromNames([]string{"view_channel", "send_messages"})
 	if err != nil || bits == 0 {
@@ -486,6 +488,65 @@ func TestDiscordGoManagerLogsDroppedInteractionEvents(t *testing.T) {
 	}
 }
 
+func TestDiscordGoManagerBulkDeleteMessagesReturnsPartialProgress(t *testing.T) {
+	t.Parallel()
+
+	session, err := discordgo.New("Bot secret")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+
+	var (
+		messagePage     int
+		bulkDeleteCalls int
+	)
+	session.Client = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			path := strings.TrimPrefix(req.URL.Path, "/api/v9")
+			path = strings.TrimPrefix(path, "/api/v10")
+
+			switch {
+			case req.Method == http.MethodGet && path == "/channels/chan-1/messages":
+				messagePage++
+				return jsonResponse(http.StatusOK, bulkDeletePage(messagePage)), nil
+			case req.Method == http.MethodPost && path == "/channels/chan-1/messages/bulk-delete":
+				bulkDeleteCalls++
+				if bulkDeleteCalls == 2 {
+					return jsonResponse(http.StatusBadRequest, `{"message":"message too old"}`), nil
+				}
+				return jsonResponse(http.StatusNoContent, ``), nil
+			default:
+				return jsonResponse(http.StatusInternalServerError, `{"message":"unexpected request"}`), nil
+			}
+		}),
+	}
+
+	manager := &DiscordGoManager{session: session}
+	result, err := manager.BulkDeleteMessages(context.Background(), discord.BulkDeleteRequest{
+		ChannelID: "chan-1",
+		UserID:    "user-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "after deleting 100 messages") {
+		t.Fatalf("BulkDeleteMessages() error = %v", err)
+	}
+	if result.Deleted != 100 || len(result.MessageIDs) != 100 {
+		t.Fatalf("BulkDeleteMessages() result = %#v", result)
+	}
+}
+
+func TestDiscordGoManagerRESTRejectsDisallowedHost(t *testing.T) {
+	t.Parallel()
+
+	manager := &DiscordGoManager{}
+	_, err := manager.REST(context.Background(), discord.RESTRequest{
+		Method: "POST",
+		Path:   "https://evil.example/exfil",
+	})
+	if err == nil || !strings.Contains(err.Error(), `rest host "evil.example" is not allowed`) {
+		t.Fatalf("REST() error = %v", err)
+	}
+}
+
 func containsPath(paths []string, target string) bool {
 	for _, path := range paths {
 		if path == target {
@@ -505,4 +566,30 @@ func intPointer(value int) *int {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func bulkDeletePage(page int) string {
+	if page > 2 {
+		return `[]`
+	}
+
+	start := 200
+	if page == 2 {
+		start = 100
+	}
+
+	var builder strings.Builder
+	builder.WriteString("[")
+	for idx := 0; idx < 100; idx++ {
+		if idx > 0 {
+			builder.WriteString(",")
+		}
+		messageID := start - idx
+		builder.WriteString(fmt.Sprintf(
+			`{"id":"m%d","channel_id":"chan-1","author":{"id":"user-1","username":"alice"},"timestamp":"2026-04-16T22:00:00Z"}`,
+			messageID,
+		))
+	}
+	builder.WriteString("]")
+	return builder.String()
 }

@@ -2,10 +2,9 @@ package managecmd
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
+	"github.com/alxxpersonal/exo-discord/internal/manage/colors"
 	"github.com/spf13/cobra"
 )
 
@@ -246,30 +245,7 @@ func newRoleUnassignCommand(env Environment) *cobra.Command {
 }
 
 func parseHexColor(value string) (*int, error) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil, nil
-	}
-	if !strings.HasPrefix(trimmed, "#") || len(trimmed) != 7 {
-		return nil, fmt.Errorf("invalid color %q", value)
-	}
-
-	var parsed int
-	for _, r := range trimmed[1:] {
-		parsed <<= 4
-		switch {
-		case r >= '0' && r <= '9':
-			parsed += int(r - '0')
-		case r >= 'a' && r <= 'f':
-			parsed += int(r-'a') + 10
-		case r >= 'A' && r <= 'F':
-			parsed += int(r-'A') + 10
-		default:
-			return nil, fmt.Errorf("invalid color %q", value)
-		}
-	}
-
-	return &parsed, nil
+	return colors.ParseOptionalHexColor(value)
 }
 
 func boolPointer(value bool) *bool {

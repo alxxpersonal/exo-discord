@@ -411,7 +411,12 @@ func detectPackageName(source string) (string, error) {
 	if file == nil || file.Name == nil {
 		return "", fmt.Errorf("script package name not found")
 	}
-	return strings.TrimSpace(file.Name.Name), nil
+
+	packageName := strings.TrimSpace(file.Name.Name)
+	if packageName != "main" {
+		return "", fmt.Errorf("script package must be main, got %q", packageName)
+	}
+	return packageName, nil
 }
 
 func validateImports(source string) error {

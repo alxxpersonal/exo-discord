@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
@@ -851,7 +853,7 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name:        "manage_exec",
 		Description: "Execute Go code through yaegi with a ManagerClient surface.",
-	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args execArgs) (*sdkmcp.CallToolResult, execResult, error) {
+	}, func(ctx context.Context, request *sdkmcp.CallToolRequest, args execArgs) (*sdkmcp.CallToolResult, execResult, error) {
 		if err := requireConfirm(args.Confirm); err != nil {
 			return nil, execResult{}, err
 		}
@@ -863,6 +865,7 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 			}
 			source = string(payload)
 		}
+		logExecAudit(request, source)
 		if err := runtimeexec.ExecuteSource(ctx, manager, source); err != nil {
 			return nil, execResult{}, err
 		}
@@ -879,4 +882,20 @@ func requireConfirm(confirm bool) error {
 		return nil
 	}
 	return fmt.Errorf(destructiveConfirmError)
+}
+
+func logExecAudit(request *sdkmcp.CallToolRequest, source string) {
+	hash := sha256.Sum256([]byte(source))
+	invoker := "unknown"
+	if request != nil && request.Session != nil {
+		invoker = request.Session.ID()
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"manage_exec audit time=%s invoker=%s sha256=%s\n",
+		time.Now().UTC().Format(time.RFC3339),
+		invoker,
+		hex.EncodeToString(hash[:]),
+	)
 }

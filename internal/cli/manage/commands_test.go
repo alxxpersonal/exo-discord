@@ -411,7 +411,7 @@ func TestManageCommandDispatchesSubcommands(t *testing.T) {
 		},
 		{
 			name: "member-kick",
-			args: []string{"member", "kick", "user-1", "--guild", "guild-1"},
+			args: []string{"member", "kick", "user-1", "--guild", "guild-1", "--yes"},
 			check: func(t *testing.T, manager *fakeManager, stdout string) {
 				t.Helper()
 				if manager.guildUserReq.GuildID != "guild-1" || manager.guildUserReq.UserID != "user-1" {
@@ -504,7 +504,17 @@ func TestManageCommandDispatchesSubcommands(t *testing.T) {
 			args: []string{"embed", "add-select", "--message", "msg-1", "--channel", "chan-1", "--options", "one:1,two:2"},
 			check: func(t *testing.T, manager *fakeManager, stdout string) {
 				t.Helper()
-				if manager.selectReq.MessageID != "msg-1" || len(manager.selectReq.Options) != 2 {
+				if manager.selectReq.MessageID != "msg-1" || len(manager.selectReq.Options) != 2 || !strings.HasPrefix(manager.selectReq.CustomID, "select-msg-1-") {
+					t.Fatalf("selectReq=%#v", manager.selectReq)
+				}
+			},
+		},
+		{
+			name: "embed-add-select-custom-id",
+			args: []string{"embed", "add-select", "--message", "msg-1", "--channel", "chan-1", "--custom-id", "sel-1", "--options", "one:1"},
+			check: func(t *testing.T, manager *fakeManager, stdout string) {
+				t.Helper()
+				if manager.selectReq.CustomID != "sel-1" {
 					t.Fatalf("selectReq=%#v", manager.selectReq)
 				}
 			},
@@ -561,6 +571,7 @@ func TestManageCommandRequiresYesForDestructiveActions(t *testing.T) {
 	}{
 		{name: "channel-delete", args: []string{"channel", "delete", "chan-1"}},
 		{name: "role-delete", args: []string{"role", "delete", "role-1", "--guild", "guild-1"}},
+		{name: "member-kick", args: []string{"member", "kick", "user-1", "--guild", "guild-1"}},
 		{name: "member-ban", args: []string{"member", "ban", "user-1", "--guild", "guild-1"}},
 		{name: "message-delete", args: []string{"message", "delete", "msg-1", "--channel", "chan-1"}},
 		{name: "message-bulk-delete", args: []string{"message", "bulk-delete", "--channel", "chan-1", "--user", "user-1"}},

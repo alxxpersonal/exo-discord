@@ -183,6 +183,20 @@ func Run(client *ManagerClient) error {
 	}
 }
 
+func TestExecuteSourceRejectsNonMainPackage(t *testing.T) {
+	source := `package tools
+
+func Run(client *ManagerClient) error {
+	return nil
+}
+`
+
+	err := ExecuteSource(context.Background(), &fakeManager{}, source)
+	if err == nil || !strings.Contains(err.Error(), `script package must be main, got "tools"`) {
+		t.Fatalf("ExecuteSource() error = %v", err)
+	}
+}
+
 func TestExecuteSourceRecoversPanic(t *testing.T) {
 	source := `package main
 

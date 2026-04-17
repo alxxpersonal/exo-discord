@@ -2,11 +2,13 @@ package scaffold
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
+	"github.com/alxxpersonal/exo-discord/internal/manage/colors"
 )
 
 // --- Plan Types ---
@@ -58,7 +60,7 @@ func LoadState(ctx context.Context, manager discord.Manager, guildID string) (St
 // --- Diffing ---
 
 // Diff calculates the delta between a scaffold spec and live state.
-func Diff(spec Spec, state State) Plan {
+func Diff(spec Spec, state State) (Plan, error) {
 	plan := Plan{
 		GuildID: spec.Guild.ID,
 		Changes: make([]Change, 0),
@@ -80,6 +82,11 @@ func Diff(spec Spec, state State) Plan {
 	})
 
 	for _, role := range desiredRoles {
+		color, err := colors.ParseOptionalHexColor(role.Color)
+		if err != nil {
+			return Plan{}, fmt.Errorf("parse role color for %q: %w", role.Name, err)
+		}
+
 		current, ok := roleIndex[role.Name]
 		if !ok {
 			plan.Changes = append(plan.Changes, Change{
@@ -91,7 +98,7 @@ func Diff(spec Spec, state State) Plan {
 		}
 
 		fields := make([]string, 0, 3)
-		if color, ok := parseHexColor(role.Color); ok && color != current.Color {
+		if color != nil && *color != current.Color {
 			fields = append(fields, "color")
 		}
 		if role.Hoist != current.Hoist {
@@ -205,7 +212,7 @@ func Diff(spec Spec, state State) Plan {
 		})
 	}
 
-	return plan
+	return plan, nil
 }
 
 func desiredChannelSpecs(spec Spec) []ChannelSpec {
@@ -293,30 +300,4 @@ func parentName(parentID string, channels []discord.GuildChannel) string {
 		}
 	}
 	return ""
-}
-
-func parseHexColor(value string) (int, bool) {
-	trimmed := strings.TrimSpace(strings.TrimPrefix(value, "#"))
-	if trimmed == "" {
-		return 0, false
-	}
-	if len(trimmed) != 6 {
-		return 0, false
-	}
-
-	var color int
-	for _, r := range trimmed {
-		color <<= 4
-		switch {
-		case r >= '0' && r <= '9':
-			color += int(r - '0')
-		case r >= 'a' && r <= 'f':
-			color += int(r-'a') + 10
-		case r >= 'A' && r <= 'F':
-			color += int(r-'A') + 10
-		default:
-			return 0, false
-		}
-	}
-	return color, true
 }

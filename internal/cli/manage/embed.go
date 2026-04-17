@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
 	"github.com/spf13/cobra"
@@ -119,6 +120,7 @@ func newEmbedAddSelectCommand(env Environment) *cobra.Command {
 	var (
 		messageID string
 		channelID string
+		customID  string
 		options   string
 	)
 
@@ -132,10 +134,14 @@ func newEmbedAddSelectCommand(env Environment) *cobra.Command {
 			}
 
 			return withManager(env, func(ctx context.Context, manager discord.Manager) error {
+				resolvedCustomID := customID
+				if resolvedCustomID == "" {
+					resolvedCustomID = fmt.Sprintf("select-%s-%d", messageID, time.Now().UnixNano())
+				}
 				message, err := manager.AddSelect(ctx, discord.SelectAddRequest{
 					ChannelID: channelID,
 					MessageID: messageID,
-					CustomID:  "select-" + messageID,
+					CustomID:  resolvedCustomID,
 					Options:   parsedOptions,
 				})
 				if err != nil {
@@ -148,6 +154,7 @@ func newEmbedAddSelectCommand(env Environment) *cobra.Command {
 
 	cmd.Flags().StringVar(&messageID, "message", "", "discord message id")
 	cmd.Flags().StringVar(&channelID, "channel", "", "discord channel id")
+	cmd.Flags().StringVar(&customID, "custom-id", "", "select custom id")
 	cmd.Flags().StringVar(&options, "options", "", "select options as label:value,label:value")
 	markRequired(cmd, "message")
 	markRequired(cmd, "channel")
