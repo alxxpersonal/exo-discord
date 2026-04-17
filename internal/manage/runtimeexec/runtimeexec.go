@@ -81,12 +81,12 @@ func (c *ManagerClient) CreateChannel(guildID string, name string, channelType s
 }
 
 // UpdateChannel updates a channel.
-func (c *ManagerClient) UpdateChannel(channelID string, name string, topic string, parentID string) (discord.GuildChannel, error) {
+func (c *ManagerClient) UpdateChannel(channelID string, name *string, topic *string, parentID *string) (discord.GuildChannel, error) {
 	return c.manager.UpdateChannel(c.ctx, discord.ChannelUpdateRequest{
 		ID:       channelID,
-		Name:     stringPointer(name),
-		Topic:    stringPointer(topic),
-		ParentID: stringPointer(parentID),
+		Name:     name,
+		Topic:    topic,
+		ParentID: parentID,
 	})
 }
 

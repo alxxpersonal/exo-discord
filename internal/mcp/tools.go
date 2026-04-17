@@ -122,10 +122,10 @@ type channelCreateArgs struct {
 }
 
 type channelUpdateArgs struct {
-	ChannelID string `json:"channel_id" jsonschema:"Discord channel id"`
-	Name      string `json:"name,omitempty" jsonschema:"Replacement channel name"`
-	Topic     string `json:"topic,omitempty" jsonschema:"Replacement topic"`
-	ParentID  string `json:"parent_id,omitempty" jsonschema:"Replacement parent category id"`
+	ChannelID string  `json:"channel_id" jsonschema:"Discord channel id"`
+	Name      *string `json:"name,omitempty" jsonschema:"Replacement channel name"`
+	Topic     *string `json:"topic,omitempty" jsonschema:"Replacement topic"`
+	ParentID  *string `json:"parent_id,omitempty" jsonschema:"Replacement parent category id"`
 }
 
 type channelDeleteArgs struct {
@@ -457,9 +457,9 @@ func registerManagerTools(server *sdkmcp.Server, manager discordpkg.Manager) {
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args channelUpdateArgs) (*sdkmcp.CallToolResult, discordpkg.GuildChannel, error) {
 		result, err := manager.UpdateChannel(ctx, discordpkg.ChannelUpdateRequest{
 			ID:       args.ChannelID,
-			Name:     stringPointer(args.Name),
-			Topic:    stringPointer(args.Topic),
-			ParentID: stringPointer(args.ParentID),
+			Name:     args.Name,
+			Topic:    args.Topic,
+			ParentID: args.ParentID,
 		})
 		return nil, result, err
 	})

@@ -544,6 +544,9 @@ func TestServerCallTools(t *testing.T) {
 				if session.channelUpdate.ID != "chan-1" || session.channelUpdate.Name == nil || *session.channelUpdate.Name != "ops-2" {
 					t.Fatalf("channel update = %#v", session.channelUpdate)
 				}
+				if session.channelUpdate.Topic != nil {
+					t.Fatalf("channel update = %#v", session.channelUpdate)
+				}
 			},
 		},
 		{

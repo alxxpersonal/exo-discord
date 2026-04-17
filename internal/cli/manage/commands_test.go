@@ -294,6 +294,9 @@ func TestManageCommandDispatchesSubcommands(t *testing.T) {
 				if manager.channelUpdate.ID != "chan-1" || manager.channelUpdate.Name == nil || *manager.channelUpdate.Name != "ops-2" {
 					t.Fatalf("channelUpdate=%#v", manager.channelUpdate)
 				}
+				if manager.channelUpdate.Topic != nil {
+					t.Fatalf("channelUpdate=%#v", manager.channelUpdate)
+				}
 			},
 		},
 		{

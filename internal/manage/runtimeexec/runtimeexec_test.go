@@ -242,8 +242,11 @@ func TestManagerClientDelegatesToManager(t *testing.T) {
 	if _, err := client.CreateChannel("guild-1", "ops", "text", "", "topic"); err != nil {
 		t.Fatalf("CreateChannel() error = %v", err)
 	}
-	if _, err := client.UpdateChannel("chan-1", "ops-2", "topic-2", ""); err != nil {
+	if _, err := client.UpdateChannel("chan-1", stringPointer("ops-2"), nil, nil); err != nil {
 		t.Fatalf("UpdateChannel() error = %v", err)
+	}
+	if manager.channelUpdate.Topic != nil {
+		t.Fatalf("channelUpdate.Topic = %q, want nil", *manager.channelUpdate.Topic)
 	}
 	if err := client.SetChannelPermission("chan-1", "role-1", "role", []string{"view_channel"}, nil); err != nil {
 		t.Fatalf("SetChannelPermission() error = %v", err)
