@@ -17,7 +17,7 @@ See `AGENTS.md` for agent execution rules.
 
 ## Architecture
 
-- Single Go binary. Bot mode is the only v1 operational mode.
+- Single Go binary. Bot mode is the primary operational mode. User-install mode is a secondary read-only mode that uses Discord OAuth 2.0 user authorization.
 - Keep the repo as a root-level single module with `cmd/exo-discord/` and `internal/`. No `pkg/`, no `cli/src/`, no sidecar.
 - Config discovery walks upward for `.exo-discord` first, then falls back to `~/.exo-discord/config.toml`.
 - Access control is local-first and independent from agent prompts. Guild traffic uses allowlists, DMs use allowlists plus pairing.
@@ -25,6 +25,16 @@ See `AGENTS.md` for agent execution rules.
 - MCP is the control surface for agents. It does not own wake-up.
 - Audit events append to `~/.exo-discord/audit.log` as JSONL.
 - Attachment handling uses metadata in hook payloads and local saves to `~/.exo-discord/inbox/`.
+
+### User-Install Mode
+
+- Lives in `internal/discord/userinstall/`. Implements the `discord.Session` interface.
+- OAuth 2.0 authorization code flow against `https://discord.com/oauth2/authorize` and `https://discord.com/api/oauth2/token`. Refresh tokens rotate on every refresh. Revoke via `/oauth2/token/revoke`.
+- Multi-user token storage at `~/.exo-discord/oauth/<user_id>.json` with `0600` perms in a `0700` directory. Keyed by Discord user id from `GET /users/@me`.
+- CSRF state validation: `crypto/rand` 32-byte base64url state, in-memory store with 10 minute TTL.
+- Read-only over REST: write operations (send, reply, react, edit, history, downloads, status) return `ErrNotSupported`. The session never opens a gateway and never emits inbound events.
+- CLI commands: `exo-discord auth login`, `exo-discord auth list`, `exo-discord auth revoke <user_id>`. Revoke requires typing the user id to confirm unless `--yes` is passed.
+- Tokens are redacted in logs via `internal/redact`. JSON outputs never include access or refresh tokens.
 
 ## Stack Decisions (Locked)
 
@@ -37,7 +47,7 @@ See `AGENTS.md` for agent execution rules.
 - Testing: standard `testing`, `httptest`, `github.com/stretchr/testify v1.11.1`
 - Logging: `log/slog` to stderr, default text, optional JSON
 - Formatting and lint: `gofmt`, `go vet`, `golangci-lint`, `git-cliff`
-- Bot token is the only v1 credential. `user_install` stays reserved and returns `user_install mode is not implemented`.
+- Bot token is the primary credential. `user_install` mode uses Discord OAuth 2.0 client id and client secret plus per-user bearer tokens stored under `~/.exo-discord/oauth/`.
 
 ## Commands
 

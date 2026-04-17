@@ -19,10 +19,20 @@ import (
 func TestDefaultSessionFactory(t *testing.T) {
 	t.Parallel()
 
-	if _, err := defaultSessionFactory(config.ResolvedConfig{
-		Config: config.Config{Mode: config.ModeUserInstall},
-	}); err == nil || err.Error() != "user_install mode is not implemented" {
-		t.Fatalf("defaultSessionFactory(user_install) error = %v", err)
+	userInstall := config.ResolvedConfig{
+		Config: config.Config{
+			Mode: config.ModeUserInstall,
+			OAuth: config.OAuthConfig{
+				ClientID:     "client",
+				ClientSecret: "secret",
+				RedirectURI:  "http://127.0.0.1:8080/cb",
+				Scopes:       []string{"identify"},
+			},
+		},
+		OAuthDirPath: filepath.Join(t.TempDir(), "oauth"),
+	}
+	if _, err := defaultSessionFactory(userInstall); err == nil || !strings.Contains(err.Error(), "no user-install tokens stored") {
+		t.Fatalf("defaultSessionFactory(user_install) error = %v, want missing tokens error", err)
 	}
 
 	session, err := defaultSessionFactory(config.ResolvedConfig{

@@ -221,6 +221,7 @@ func TestRootCommandRegistersSpecCommands(t *testing.T) {
 		"pair",
 		"mcp",
 		"user-install-mode",
+		"auth",
 	}
 	for _, name := range required {
 		if !slices.Contains(names, name) {
@@ -619,23 +620,23 @@ func TestBotModeCommandUsesInjectedRunner(t *testing.T) {
 	}
 }
 
-func TestUserInstallModeCommandReturnsReservedError(t *testing.T) {
+func TestUserInstallModeCommandPrintsAuthHint(t *testing.T) {
 	t.Parallel()
 
+	stdout := &bytes.Buffer{}
 	cmd := NewRootCommand(Environment{
 		StartDir: t.TempDir(),
 		HomeDir:  t.TempDir(),
-		Stdout:   &bytes.Buffer{},
+		Stdout:   stdout,
 		Stderr:   &bytes.Buffer{},
 	})
 	cmd.SetArgs([]string{"user-install-mode"})
 
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("Execute() error = nil, want reserved mode error")
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
-	if got, want := err.Error(), "user_install mode is not implemented"; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
+	if !strings.Contains(stdout.String(), "auth login") {
+		t.Fatalf("stdout = %q, want auth login hint", stdout.String())
 	}
 }
 

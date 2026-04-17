@@ -31,6 +31,15 @@ type Environment struct {
 	NewMCPServer   func(discordpkg.Session) mcpServer
 	ListenRunner   listenRunner
 	BotModeRunner  botModeRunner
+	OAuthOverride  oauthEndpointOverride
+	OAuthAPIBase   string
+}
+
+// oauthEndpointOverride lets tests redirect Discord oauth endpoints to a local server.
+type oauthEndpointOverride struct {
+	AuthorizeBase string
+	TokenBase     string
+	RevokeBase    string
 }
 
 // --- Internal Types ---
@@ -144,6 +153,7 @@ func NewRootCommand(env Environment) *cobra.Command {
 	root.AddCommand(newPairCommand(env))
 	root.AddCommand(newMCPCommand(env))
 	root.AddCommand(newUserInstallModeCommand())
+	root.AddCommand(newAuthCommand(env))
 
 	return root
 }
@@ -172,7 +182,7 @@ func (env Environment) commandContext() context.Context {
 
 func defaultSessionFactory(resolved config.ResolvedConfig) (discordpkg.Session, error) {
 	if resolved.Config.Mode == config.ModeUserInstall {
-		return nil, errors.New("user_install mode is not implemented")
+		return buildUserInstallSession(resolved)
 	}
 
 	token := strings.TrimSpace(resolved.Config.BotToken)
