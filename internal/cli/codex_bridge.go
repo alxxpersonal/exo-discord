@@ -87,6 +87,13 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 				return err
 			}
 
+			logger := newLogger(resolved.Config.Logging, cmd.ErrOrStderr())
+			auditor := audit.NewLogger(resolved.AuditLogPath)
+			accessManager.SetLogger(logger)
+			if err := accessManager.StartAutoReload(ctx, resolved.ConfigPath, auditor); err != nil {
+				return err
+			}
+
 			service := runtimepkg.New(
 				session,
 				accessManager,
@@ -95,8 +102,8 @@ func newCodexBridgeCommand(env Environment) *cobra.Command {
 						return adapter.Deliver(ctx, eventFromEnvelope(envelope))
 					},
 				},
-				audit.NewLogger(resolved.AuditLogPath),
-				newLogger(resolved.Config.Logging, cmd.ErrOrStderr()),
+				auditor,
+				logger,
 				resolved.Config.Hook.Timeout.Duration(),
 				statusRequestFromConfig(resolved.Config.Status),
 			)

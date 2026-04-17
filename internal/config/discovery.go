@@ -73,6 +73,11 @@ func DiscoverFrom(startDir string, homeDir string) (ResolvedConfig, error) {
 
 // --- Load Helpers ---
 
+// LoadResolvedPath returns the resolved config for an explicit config path and home dir.
+func LoadResolvedPath(configPath string, homeDir string) (ResolvedConfig, error) {
+	return loadResolved(configPath, homeDir)
+}
+
 func loadResolved(configPath string, homeDir string) (ResolvedConfig, error) {
 	if err := RequireExactFilePerms(configPath, 0o600); err != nil {
 		return ResolvedConfig{}, err

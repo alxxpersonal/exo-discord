@@ -1,22 +1,33 @@
 package access
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/alxxpersonal/exo-discord/internal/audit"
 )
 
 // --- Types ---
 
 // Manager evaluates access policy and persists pairing state.
 type Manager struct {
-	mu        sync.Mutex
-	state     State
-	statePath string
-	policy    Policy
-	now       func() time.Time
-	newCode   func() (string, error)
+	mu         sync.RWMutex
+	state      State
+	statePath  string
+	policy     Policy
+	configPath string
+	watcher    *Watcher
+	logger     *slog.Logger
+	auditor    *audit.Logger
+	now        func() time.Time
+	newCode    func() (string, error)
 }
 
 // --- Constructors ---
@@ -32,6 +43,7 @@ func NewManager(statePath string, policy Policy) (*Manager, error) {
 		state:     state,
 		statePath: statePath,
 		policy:    policy,
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now:       time.Now,
 		newCode:   GenerateCode,
 	}
@@ -41,7 +53,56 @@ func NewManager(statePath string, policy Policy) (*Manager, error) {
 	return manager, nil
 }
 
+// SetLogger updates the logger used for access reload warnings and errors.
+func (m *Manager) SetLogger(logger *slog.Logger) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	m.logger = logger
+}
+
 // --- Decisions ---
+
+// ReloadPolicy reloads the config-backed policy and persisted access state.
+func (m *Manager) ReloadPolicy(ctx context.Context) error {
+	return m.reloadPolicy(ctx, ReloadSourceConfig, false)
+}
+
+// StartAutoReload starts a background watcher that reloads policy and state on disk changes.
+func (m *Manager) StartAutoReload(ctx context.Context, configPath string, auditor *audit.Logger) error {
+	configPath = filepath.Clean(configPath)
+	if err := ctx.Err(); err != nil {
+		m.logger.Debug(
+			"access auto-reload not started because context is already canceled",
+			"component", "access",
+			"config_path", configPath,
+			"state_path", m.statePath,
+		)
+		return nil
+	}
+
+	watcher, err := NewWatcher(configPath, m.statePath)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	if m.watcher != nil {
+		m.mu.Unlock()
+		_ = watcher.Close()
+		return errors.New("access auto-reload is already running")
+	}
+	m.configPath = configPath
+	m.auditor = auditor
+	m.watcher = watcher
+	m.mu.Unlock()
+
+	go m.runAutoReload(ctx, watcher)
+	return nil
+}
 
 // Evaluate returns the access decision for a message context.
 func (m *Manager) Evaluate(ctx MessageContext) (Decision, error) {
@@ -100,8 +161,8 @@ func (m *Manager) Deny(code string) error {
 
 // PendingPairs returns the pending pairs in creation order.
 func (m *Manager) PendingPairs() []PendingPair {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	result := make([]PendingPair, 0, len(m.state.PendingPairs))
 	for _, pending := range m.state.PendingPairs {
@@ -205,6 +266,82 @@ func (m *Manager) evaluateGuildLocked(ctx MessageContext) Decision {
 
 // --- State Helpers ---
 
+func (m *Manager) runAutoReload(ctx context.Context, watcher *Watcher) {
+	defer func() {
+		_ = watcher.Close()
+
+		m.mu.Lock()
+		if m.watcher == watcher {
+			m.watcher = nil
+		}
+		m.mu.Unlock()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-watcher.Events():
+			if !ok {
+				return
+			}
+			if err := m.reloadPolicy(ctx, event.Source, true); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				m.logger.Error(
+					"failed to reload access policy",
+					"component", "access",
+					"config_path", m.configPath,
+					"state_path", m.statePath,
+					"source", string(event.Source),
+					"error", err,
+				)
+			}
+		case err, ok := <-watcher.Errors():
+			if !ok {
+				return
+			}
+			m.logger.Warn(
+				"access watcher warning",
+				"component", "access",
+				"config_path", m.configPath,
+				"state_path", m.statePath,
+				"error", err,
+			)
+		}
+	}
+}
+
+func (m *Manager) reloadPolicy(ctx context.Context, source ReloadSource, auditReload bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	policy, err := loadPolicy(m.configPath, m.statePath)
+	if err != nil {
+		return err
+	}
+
+	state, err := LoadState(m.statePath)
+	if err != nil {
+		return err
+	}
+
+	m.policy = policy
+	m.state = state
+	if err := m.pruneExpiredLocked(); err != nil {
+		return err
+	}
+	if auditReload {
+		m.recordReloadLocked(source)
+	}
+	return nil
+}
+
 func (m *Manager) pruneExpiredLocked() error {
 	now := m.now().UTC()
 	changed := false
@@ -219,6 +356,26 @@ func (m *Manager) pruneExpiredLocked() error {
 		return SaveState(m.statePath, m.state)
 	}
 	return nil
+}
+
+func (m *Manager) recordReloadLocked(source ReloadSource) {
+	if m.auditor == nil {
+		return
+	}
+
+	if err := m.auditor.Write(audit.Record{
+		Timestamp: m.now().UTC(),
+		Component: "access",
+		Event:     "access_policy_reloaded",
+		Source:    string(source),
+	}); err != nil {
+		m.logger.Error(
+			"failed to write access reload audit record",
+			"component", "access",
+			"event", "access_policy_reloaded",
+			"error", err,
+		)
+	}
 }
 
 // --- Slice Helpers ---

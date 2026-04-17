@@ -241,6 +241,123 @@ func TestChannelPluginCommandWritesChannelAuditLog(t *testing.T) {
 	}
 }
 
+func TestChannelPluginCommandHotReloadsAccessAllowlist(t *testing.T) {
+	t.Parallel()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, "mode = \"bot\"\nbot_token = \"secret\"\nmcp_enabled = true\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderr := &bytes.Buffer{}
+
+	session := &fakeSession{}
+	manager := &fakeManager{}
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdin:    stdinReader,
+		Stdout:   stdoutWriter,
+		Stderr:   stderr,
+		Context: func() context.Context {
+			return ctx
+		},
+		NewSession: func(config.ResolvedConfig) (discordpkg.Session, error) {
+			return session, nil
+		},
+		NewManager: func(config.ResolvedConfig) (discordpkg.Manager, error) {
+			return manager, nil
+		},
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"channel-plugin"})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Execute()
+	}()
+
+	reader := bufio.NewReader(stdoutReader)
+	writeJSONLine(t, stdinWriter, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]any{},
+			"clientInfo": map[string]any{
+				"name":    "test-client",
+				"version": "0.1.0",
+			},
+		},
+	})
+	_ = readJSONLine(t, reader)
+
+	writeJSONLine(t, stdinWriter, map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+
+	waitFor(t, time.Second, func() bool {
+		return session.OpenCount() == 1
+	})
+
+	runAccessAllowUser(t, startDir, homeDir, "user-1")
+	auditPath := filepath.Join(homeDir, ".exo-discord", "audit.log")
+	waitFor(t, time.Second, func() bool {
+		data, err := os.ReadFile(auditPath)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(data), "\"event\":\"access_policy_reloaded\"") &&
+			strings.Contains(string(data), "\"source\":\"config\"")
+	})
+
+	go session.emit(context.Background(), discordpkg.Message{
+		ID:             "msg-1",
+		ChannelID:      "dm-1",
+		ChannelKind:    discordpkg.ChannelKindDM,
+		AuthorID:       "user-1",
+		AuthorUsername: "alice",
+		Content:        "hello after reload",
+		Timestamp:      time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC),
+	})
+
+	notificationCh := make(chan map[string]any, 1)
+	go func() {
+		notificationCh <- readJSONLine(t, reader)
+	}()
+
+	select {
+	case notification := <-notificationCh:
+		if notification["method"] != "notifications/claude/channel" {
+			t.Fatalf("notification method = %#v, want notifications/claude/channel", notification["method"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel notification did not arrive after hot reload")
+	}
+
+	cancel()
+	_ = stdinWriter.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel-plugin command did not shut down")
+	}
+
+	if got := session.SendRequest().Text; got != "" {
+		t.Fatalf("pairing message = %q, want no pairing prompt after reload", got)
+	}
+}
+
 // --- Helpers ---
 
 func writeJSONLine(t *testing.T, writer *io.PipeWriter, value any) {

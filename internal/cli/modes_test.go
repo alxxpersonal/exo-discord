@@ -5,8 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,6 +157,71 @@ func TestDefaultBotModeRunner(t *testing.T) {
 	}
 }
 
+func TestBotModeRunnerHotReloadsAccessAllowlist(t *testing.T) {
+	t.Parallel()
+
+	startDir, homeDir := setupWorkspace(t)
+	var hookCalls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hookCalls.Add(1)
+		_, _ = io.WriteString(w, `{"decision":"reply","reply":{"text":"ready"}}`)
+	}))
+	defer server.Close()
+
+	writeProjectConfig(t, startDir, "mode = \"bot\"\nbot_token = \"secret\"\n[hook]\nkind = \"http\"\ntimeout = \"1s\"\n[hook.http]\nurl = \""+server.URL+"\"\n")
+
+	resolved, err := config.DiscoverFrom(startDir, homeDir)
+	if err != nil {
+		t.Fatalf("DiscoverFrom() error = %v", err)
+	}
+
+	session := &fakeSession{}
+	request := botModeRequest{
+		Config:  resolved,
+		Session: session,
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- defaultBotModeRunner{}.Run(ctx, request)
+	}()
+
+	waitForCondition(t, func() bool { return session.OpenCount() == 1 })
+	runAccessAllowUser(t, startDir, homeDir, "user-1")
+
+	auditPath := filepath.Join(homeDir, ".exo-discord", "audit.log")
+	waitForCondition(t, func() bool {
+		data, readErr := os.ReadFile(auditPath)
+		if readErr != nil {
+			return false
+		}
+		return strings.Contains(string(data), "\"event\":\"access_policy_reloaded\"") &&
+			strings.Contains(string(data), "\"source\":\"config\"")
+	})
+
+	session.emit(context.Background(), discordpkg.Message{
+		ID:          "msg-1",
+		ChannelID:   "dm-1",
+		ChannelKind: discordpkg.ChannelKindDM,
+		AuthorID:    "user-1",
+	})
+
+	waitForCondition(t, func() bool {
+		return session.ReplyRequest().Text == "ready" && hookCalls.Load() == 1
+	})
+
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := session.SendRequest().Text; got != "" {
+		t.Fatalf("pairing message = %q, want no pairing prompt after reload", got)
+	}
+}
+
 func TestNewHookClientAndHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -191,4 +260,19 @@ func waitForCondition(t *testing.T, fn func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition did not become true")
+}
+
+func runAccessAllowUser(t *testing.T, startDir string, homeDir string, userID string) {
+	t.Helper()
+
+	cmd := NewRootCommand(Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+	})
+	cmd.SetArgs([]string{"access", "allow-user", userID})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(access allow-user) error = %v", err)
+	}
 }
