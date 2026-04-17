@@ -186,6 +186,9 @@ type OAuthConfig struct {
 	ClientSecret string   `toml:"client_secret"`
 	RedirectURI  string   `toml:"redirect_uri"`
 	Scopes       []string `toml:"scopes"`
+	// ForceConsent appends `prompt=consent` to the authorize URL so Discord always
+	// re-asks the user for authorization. Defaults to false.
+	ForceConsent bool `toml:"force_consent"`
 }
 
 // PairingConfig stores DM pairing settings.

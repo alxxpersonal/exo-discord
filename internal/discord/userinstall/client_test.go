@@ -136,6 +136,35 @@ func TestRESTClient429ReturnsRateLimitedError(t *testing.T) {
 	}
 }
 
+// --- M5: waitForBucket respects context cancellation ---
+
+func TestWaitForBucketReturnsContextErrorOnCancel(t *testing.T) {
+	t.Parallel()
+
+	client := NewRESTClient(nil, "http://x", "token")
+	// seed a bucket reset far in the future
+	client.mu.Lock()
+	client.bucketReset["users-me"] = client.clock().Add(time.Hour)
+	client.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := client.waitForBucket(ctx, "users-me")
+	if err == nil {
+		t.Fatal("waitForBucket() error = nil, want context error")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	// bucket entry must be cleared on exit via defer
+	client.mu.Lock()
+	_, present := client.bucketReset["users-me"]
+	client.mu.Unlock()
+	if present {
+		t.Fatal("bucketReset entry remained after wait")
+	}
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	t.Parallel()
 

@@ -285,6 +285,97 @@ func TestRevokeTokenErrorsOnNon200(t *testing.T) {
 	}
 }
 
+// --- M3: error body is redacted except for rfc 6749 fields ---
+
+func TestExchangeCodeErrorBodyOnlyEchoesKnownFields(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"bad code","secret_token":"leaked-abc123"}`))
+	}))
+	defer server.Close()
+
+	client := NewOAuthClient(OAuthConfig{
+		ClientID:     "c",
+		ClientSecret: "s",
+		RedirectURI:  "http://x",
+		Scopes:       []string{"identify"},
+		TokenBase:    server.URL,
+	}, server.Client())
+	_, err := client.ExchangeCode(context.Background(), "bad")
+	if err == nil {
+		t.Fatal("ExchangeCode() error = nil, want status error")
+	}
+	if strings.Contains(err.Error(), "leaked-abc123") || strings.Contains(err.Error(), "secret_token") {
+		t.Fatalf("error = %v, leaked non-rfc6749 fields", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_grant") || !strings.Contains(err.Error(), "bad code") {
+		t.Fatalf("error = %v, want invalid_grant + description", err)
+	}
+}
+
+func TestRevokeTokenErrorBodyOnlyEchoesKnownFields(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_token","secret":"leaked"}`))
+	}))
+	defer server.Close()
+
+	client := NewOAuthClient(OAuthConfig{
+		ClientID:     "c",
+		ClientSecret: "s",
+		RedirectURI:  "http://x",
+		Scopes:       []string{"identify"},
+		RevokeBase:   server.URL,
+	}, server.Client())
+	err := client.RevokeToken(context.Background(), "token", "")
+	if err == nil {
+		t.Fatal("RevokeToken() error = nil, want status error")
+	}
+	if strings.Contains(err.Error(), "leaked") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("error = %v, leaked non-rfc6749 field", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_token") {
+		t.Fatalf("error = %v, want invalid_token", err)
+	}
+}
+
+// --- M4: prompt=consent is off by default, opt-in ---
+
+func TestAuthorizationURLPromptConsentOptIn(t *testing.T) {
+	t.Parallel()
+
+	client := NewOAuthClient(OAuthConfig{
+		ClientID:    "c",
+		RedirectURI: "http://x",
+		Scopes:      []string{"identify"},
+	}, nil)
+	raw, _, err := client.AuthorizationURL()
+	if err != nil {
+		t.Fatalf("AuthorizationURL() error = %v", err)
+	}
+	if strings.Contains(raw, "prompt=consent") {
+		t.Fatalf("authorize url contains prompt=consent by default: %q", raw)
+	}
+
+	client = NewOAuthClient(OAuthConfig{
+		ClientID:     "c",
+		RedirectURI:  "http://x",
+		Scopes:       []string{"identify"},
+		ForceConsent: true,
+	}, nil)
+	raw, _, err = client.AuthorizationURL()
+	if err != nil {
+		t.Fatalf("AuthorizationURL() error = %v", err)
+	}
+	if !strings.Contains(raw, "prompt=consent") {
+		t.Fatalf("authorize url missing prompt=consent with ForceConsent: %q", raw)
+	}
+}
+
 func TestTokenResponseRejectsMissingAccessToken(t *testing.T) {
 	t.Parallel()
 

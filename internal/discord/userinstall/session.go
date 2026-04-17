@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/discord"
@@ -28,17 +29,17 @@ type TokenRefresher interface {
 // User-install mode is read-only against the Discord REST API. Outbound message,
 // reply, react, edit, download, and status operations return ErrNotSupported.
 type Session struct {
-	userID       string
-	storage      *Storage
-	refresher    TokenRefresher
-	rest         *RESTClient
-	mu           sync.RWMutex
-	token        StoredToken
-	subscribers  map[uint64]discord.InboundHandler
-	nextSubID    uint64
-	refreshLead  time.Duration
-	clock        func() time.Time
-	restFactory  func(bearer string) *RESTClient
+	userID      string
+	storage     *Storage
+	refresher   TokenRefresher
+	rest        atomic.Pointer[RESTClient]
+	mu          sync.RWMutex
+	token       StoredToken
+	subscribers map[uint64]discord.InboundHandler
+	nextSubID   uint64
+	refreshLead time.Duration
+	clock       func() time.Time
+	restFactory func(bearer string) *RESTClient
 }
 
 // Config stores the UserSession construction values.
@@ -69,6 +70,9 @@ func NewSession(cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	if token.UserID != "" && token.UserID != cfg.UserID {
+		return nil, fmt.Errorf("oauth token user id %q does not match config user id %q", token.UserID, cfg.UserID)
+	}
 
 	lead := cfg.RefreshLead
 	if lead <= 0 {
@@ -79,17 +83,18 @@ func NewSession(cfg Config) (*Session, error) {
 		return NewRESTClient(cfg.HTTPClient, cfg.APIBase, bearer)
 	}
 
-	return &Session{
+	sess := &Session{
 		userID:      cfg.UserID,
 		storage:     cfg.Storage,
 		refresher:   cfg.Refresher,
-		rest:        restFactory(token.AccessToken),
 		token:       token,
 		subscribers: make(map[uint64]discord.InboundHandler),
 		refreshLead: lead,
 		clock:       time.Now,
 		restFactory: restFactory,
-	}, nil
+	}
+	sess.rest.Store(restFactory(token.AccessToken))
+	return sess, nil
 }
 
 // --- Lifecycle ---
@@ -99,7 +104,11 @@ func (s *Session) Open(ctx context.Context) error {
 	if err := s.ensureFresh(ctx); err != nil {
 		return err
 	}
-	if _, err := s.rest.CurrentUser(ctx); err != nil {
+	rest := s.rest.Load()
+	if rest == nil {
+		return fmt.Errorf("user-install session not initialized")
+	}
+	if _, err := rest.CurrentUser(ctx); err != nil {
 		return fmt.Errorf("verify user-install token: %w", err)
 	}
 	return nil
@@ -217,7 +226,7 @@ func (s *Session) ensureFresh(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.token = updated
-	s.rest = s.restFactory(updated.AccessToken)
 	s.mu.Unlock()
+	s.rest.Store(s.restFactory(updated.AccessToken))
 	return nil
 }

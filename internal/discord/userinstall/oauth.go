@@ -35,6 +35,9 @@ type OAuthConfig struct {
 	ClientSecret string
 	RedirectURI  string
 	Scopes       []string
+	// ForceConsent adds `prompt=consent` to the authorize URL so Discord re-asks
+	// the user each time. Defaults to false (Discord decides).
+	ForceConsent bool
 	// AuthorizeBase overrides AuthorizeEndpoint when non-empty (for tests).
 	AuthorizeBase string
 	// TokenBase overrides TokenEndpoint when non-empty (for tests).
@@ -118,7 +121,9 @@ func (c *OAuthClient) AuthorizationURL() (string, string, error) {
 	values.Set("redirect_uri", c.cfg.RedirectURI)
 	values.Set("state", state)
 	values.Set("integration_type", "1")
-	values.Set("prompt", "consent")
+	if c.cfg.ForceConsent {
+		values.Set("prompt", "consent")
+	}
 
 	return base + "?" + values.Encode(), state, nil
 }
@@ -196,9 +201,35 @@ func (c *OAuthClient) RevokeToken(ctx context.Context, token string, hint string
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("revoke returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("revoke returned status %d: %s", resp.StatusCode, formatOAuthError(body))
 	}
 	return nil
+}
+
+// formatOAuthError extracts the `error` and `error_description` fields from an
+// rfc 6749 error response body, returning a compact "error: description" string.
+// Unknown bodies collapse to "<redacted>" to avoid echoing server payloads.
+func formatOAuthError(body []byte) string {
+	body = []byte(strings.TrimSpace(string(body)))
+	if len(body) == 0 {
+		return "<empty>"
+	}
+	var parsed struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "<redacted>"
+	}
+	errCode := strings.TrimSpace(parsed.Error)
+	if errCode == "" {
+		return "<redacted>"
+	}
+	desc := strings.TrimSpace(parsed.ErrorDescription)
+	if desc == "" {
+		return errCode
+	}
+	return errCode + ": " + desc
 }
 
 // --- Internal Helpers ---
@@ -232,7 +263,7 @@ func (c *OAuthClient) postToken(ctx context.Context, values url.Values) (TokenRe
 		return TokenResponse{}, fmt.Errorf("read token body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return TokenResponse{}, fmt.Errorf("token endpoint returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return TokenResponse{}, fmt.Errorf("token endpoint returned status %d: %s", resp.StatusCode, formatOAuthError(body))
 	}
 
 	var token TokenResponse

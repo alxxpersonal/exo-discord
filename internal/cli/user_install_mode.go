@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -406,6 +407,7 @@ func requireOAuthConfig(resolved config.ResolvedConfig) (userinstall.OAuthConfig
 		ClientSecret: cfg.ClientSecret,
 		RedirectURI:  cfg.RedirectURI,
 		Scopes:       scopes,
+		ForceConsent: cfg.ForceConsent,
 	}, nil
 }
 
@@ -455,48 +457,24 @@ func parseCallback(input string) (string, string) {
 	if trimmed == "" {
 		return "", ""
 	}
-	if strings.Contains(trimmed, "?") || strings.HasPrefix(trimmed, "http") {
-		if idx := strings.Index(trimmed, "?"); idx >= 0 {
-			return parseQuery(trimmed[idx+1:])
+	// full url form: parse via net/url so %20, +, and encoded chars round-trip.
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		if parsed, err := url.Parse(trimmed); err == nil {
+			values := parsed.Query()
+			return values.Get("code"), values.Get("state")
 		}
+		return "", ""
 	}
-	// bare values may be "code=... state=..." or just a code
-	if strings.Contains(trimmed, "=") {
-		return parseQuery(trimmed)
+	// allow space-separated pairs by normalizing to `&` before handing to ParseQuery.
+	normalized := strings.ReplaceAll(trimmed, " ", "&")
+	if strings.Contains(normalized, "=") {
+		values, err := url.ParseQuery(normalized)
+		if err != nil {
+			return "", ""
+		}
+		return values.Get("code"), values.Get("state")
 	}
 	return trimmed, ""
-}
-
-func parseQuery(raw string) (string, string) {
-	var code, state string
-	for _, part := range splitPairs(raw) {
-		key, value, ok := cutPair(part)
-		if !ok {
-			continue
-		}
-		switch key {
-		case "code":
-			code = value
-		case "state":
-			state = value
-		}
-	}
-	return code, state
-}
-
-func splitPairs(raw string) []string {
-	fields := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == '&' || r == ' '
-	})
-	return fields
-}
-
-func cutPair(pair string) (string, string, bool) {
-	idx := strings.Index(pair, "=")
-	if idx < 0 {
-		return "", "", false
-	}
-	return pair[:idx], pair[idx+1:], true
 }
 
 func confirmRevocation(r io.Reader, stderr io.Writer, userID string) (bool, error) {

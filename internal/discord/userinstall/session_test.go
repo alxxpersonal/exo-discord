@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +200,91 @@ func TestSessionRefreshesExpiredToken(t *testing.T) {
 	if persisted.AccessToken != "access-new" || persisted.RefreshToken != "refresh-new" {
 		t.Fatalf("persisted = %#v, want rotated tokens", persisted)
 	}
+}
+
+// --- M1: Concurrent Open / Subscribe race coverage ---
+
+func TestSessionOpenIsConcurrentSafe(t *testing.T) {
+	t.Parallel()
+
+	storage, _ := NewStorage(filepath.Join(t.TempDir(), "oauth"))
+	if err := storage.Save(StoredToken{
+		UserID:       "221",
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"221","username":"alxx"}`))
+	}))
+	defer server.Close()
+
+	session, err := NewSession(Config{
+		UserID:     "221",
+		Storage:    storage,
+		Refresher:  &fakeRefresher{},
+		HTTPClient: server.Client(),
+		APIBase:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			unsub := session.Subscribe(func(context.Context, discord.Message) {})
+			unsub()
+		}
+		close(done)
+	}()
+	for i := 0; i < 50; i++ {
+		if err := session.Open(context.Background()); err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+	}
+	<-done
+}
+
+// --- M2: Reject mismatched user id between token and config ---
+
+func TestNewSessionRejectsMismatchedUserID(t *testing.T) {
+	t.Parallel()
+
+	storage, _ := NewStorage(filepath.Join(t.TempDir(), "oauth"))
+	if err := storage.Save(StoredToken{
+		UserID:      "221",
+		AccessToken: "access-1",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	// rewrite the file so the payload user id differs from the filename key
+	path, _ := storage.PathFor("221")
+	tampered := `{"user_id":"999","access_token":"access-1","expires_at":"2099-01-01T00:00:00Z","obtained_at":"2099-01-01T00:00:00Z"}`
+	if err := writeTamperedToken(path, tampered); err != nil {
+		t.Fatalf("write tampered token: %v", err)
+	}
+
+	_, err := NewSession(Config{
+		UserID:    "221",
+		Storage:   storage,
+		Refresher: &fakeRefresher{},
+	})
+	if err == nil {
+		t.Fatal("NewSession() error = nil, want mismatch rejection")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("error = %v, want mismatch message", err)
+	}
+}
+
+func writeTamperedToken(path string, body string) error {
+	return os.WriteFile(path, []byte(body), 0o600)
 }
 
 func TestSessionRefreshErrorPropagates(t *testing.T) {

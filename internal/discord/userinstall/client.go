@@ -88,7 +88,9 @@ func (c *RESTClient) do(ctx context.Context, method string, path string, bucket 
 		return fmt.Errorf("user-auth bearer token is required")
 	}
 
-	c.waitForBucket(ctx, bucket)
+	if err := c.waitForBucket(ctx, bucket); err != nil {
+		return fmt.Errorf("wait for rate limit bucket %q: %w", bucket, err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.apiBase+path, nil)
 	if err != nil {
@@ -159,29 +161,32 @@ func (c *RESTClient) recordRateLimit(bucket string, header http.Header) {
 	c.bucketReset[bucket] = c.clock().Add(time.Duration(seconds * float64(time.Second)))
 }
 
-func (c *RESTClient) waitForBucket(ctx context.Context, bucket string) {
+func (c *RESTClient) waitForBucket(ctx context.Context, bucket string) error {
 	c.mu.Lock()
 	reset, ok := c.bucketReset[bucket]
 	c.mu.Unlock()
 	if !ok {
-		return
+		return nil
 	}
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.bucketReset, bucket)
+		c.mu.Unlock()
+	}()
 
 	wait := reset.Sub(c.clock())
 	if wait <= 0 {
-		c.mu.Lock()
-		delete(c.bucketReset, bucket)
-		c.mu.Unlock()
-		return
+		return nil
 	}
 
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return
-	case <-time.After(wait):
-		c.mu.Lock()
-		delete(c.bucketReset, bucket)
-		c.mu.Unlock()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

@@ -33,7 +33,9 @@ See `AGENTS.md` for agent execution rules.
 - Multi-user token storage at `~/.exo-discord/oauth/<user_id>.json` with `0600` perms in a `0700` directory. Keyed by Discord user id from `GET /users/@me`.
 - CSRF state validation: `crypto/rand` 32-byte base64url state, in-memory store with 10 minute TTL.
 - Read-only over REST: write operations (send, reply, react, edit, history, downloads, status) return `ErrNotSupported`. The session never opens a gateway and never emits inbound events.
-- CLI commands: `exo-discord auth login`, `exo-discord auth list`, `exo-discord auth revoke <user_id>`. Revoke requires typing the user id to confirm unless `--yes` is passed.
+- CLI commands: `exo-discord auth login`, `exo-discord auth list`, `exo-discord auth revoke <user_id>`. Revoke requires typing the user id to confirm unless `--yes` is passed. Remote revoke failures are surfaced to stderr and exit non-zero; pass `--force` to delete the local token anyway.
+- Multi-user selection: when multiple tokens are stored, use `--as-user <user_id>` or `EXO_DISCORD_USER_ID=<user_id>` to pick one. Running session-building commands without a selection returns a listing error.
+- `oauth.force_consent` (default `false`): when true, appends `prompt=consent` to the authorize URL so Discord always re-asks the user. Leave false unless you need to force re-authorization.
 - Tokens are redacted in logs via `internal/redact`. JSON outputs never include access or refresh tokens.
 
 ## Stack Decisions (Locked)

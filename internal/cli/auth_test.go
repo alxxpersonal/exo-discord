@@ -250,6 +250,21 @@ func TestParseCallbackHandlesURLAndPairs(t *testing.T) {
 	}
 }
 
+// --- M6: parseCallback uses net/url and decodes %20 in state ---
+
+func TestParseCallbackDecodesURLEncodedState(t *testing.T) {
+	t.Parallel()
+
+	code, state := parseCallback("http://127.0.0.1/cb?code=c1&state=a%20b%20c")
+	if code != "c1" || state != "a b c" {
+		t.Fatalf("parseCallback(url encoded state) = %q,%q, want %q,%q", code, state, "c1", "a b c")
+	}
+	code, state = parseCallback("http://127.0.0.1/cb?code=c1&state=plus+sign")
+	if code != "c1" || state != "plus sign" {
+		t.Fatalf("parseCallback(plus in state) = %q,%q, want %q,%q", code, state, "c1", "plus sign")
+	}
+}
+
 func TestSplitScope(t *testing.T) {
 	t.Parallel()
 
