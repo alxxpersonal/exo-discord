@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/alxxpersonal/exo-discord/internal/channelbridge"
 	"github.com/alxxpersonal/exo-discord/internal/config"
@@ -21,6 +26,28 @@ func (fakeChannelAdapter) Name() string { return "codex" }
 func (fakeChannelAdapter) Deliver(context.Context, channelbridge.Event) error { return nil }
 
 func (fakeChannelAdapter) Close() error { return nil }
+
+type captureChannelAdapter struct {
+	mu     sync.Mutex
+	events []channelbridge.Event
+}
+
+func (a *captureChannelAdapter) Name() string { return "codex" }
+
+func (a *captureChannelAdapter) Deliver(_ context.Context, event channelbridge.Event) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, event)
+	return nil
+}
+
+func (a *captureChannelAdapter) Close() error { return nil }
+
+func (a *captureChannelAdapter) Count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.events)
+}
 
 // --- Test Cases ---
 
@@ -135,5 +162,77 @@ func TestCodexBridgeCommandUsesInjectedAdapter(t *testing.T) {
 	}
 	if session.OpenCount() != 1 || session.CloseCount() != 1 {
 		t.Fatalf("session open=%d close=%d, want 1/1", session.OpenCount(), session.CloseCount())
+	}
+}
+
+func TestCodexBridgeCommandHotReloadsAccessAllowlist(t *testing.T) {
+	t.Parallel()
+
+	startDir, homeDir := setupWorkspace(t)
+	writeProjectConfig(t, startDir, "mode = \"bot\"\nbot_token = \"secret\"\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &fakeSession{}
+	adapter := &captureChannelAdapter{}
+	env := Environment{
+		StartDir: startDir,
+		HomeDir:  homeDir,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		Context: func() context.Context {
+			return ctx
+		},
+		NewSession: func(config.ResolvedConfig) (discordpkg.Session, error) {
+			return session, nil
+		},
+		NewChannelAdapter: func(channelbridge.Config, channelbridge.HookEnv) (channelAdapter, error) {
+			return adapter, nil
+		},
+	}
+
+	cmd := NewRootCommand(env)
+	cmd.SetArgs([]string{"codex-bridge", "--transport", "unix", "--socket", "/tmp/broker.sock"})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Execute()
+	}()
+
+	waitForCondition(t, func() bool { return session.OpenCount() == 1 })
+	runAccessAllowUser(t, startDir, homeDir, "user-1")
+
+	auditPath := filepath.Join(homeDir, ".exo-discord", "audit.log")
+	waitForCondition(t, func() bool {
+		data, err := os.ReadFile(auditPath)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(data), "\"event\":\"access_policy_reloaded\"") &&
+			strings.Contains(string(data), "\"source\":\"config\"")
+	})
+
+	session.emit(context.Background(), discordpkg.Message{
+		ID:          "msg-1",
+		ChannelID:   "dm-1",
+		ChannelKind: discordpkg.ChannelKindDM,
+		AuthorID:    "user-1",
+	})
+
+	waitForCondition(t, func() bool {
+		return adapter.Count() == 1
+	})
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("codex-bridge command did not shut down")
+	}
+
+	if got := session.SendRequest().Text; got != "" {
+		t.Fatalf("pairing message = %q, want no pairing prompt after reload", got)
 	}
 }
