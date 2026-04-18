@@ -38,7 +38,8 @@ doctor: ## Run diagnostics
 	go run ./cmd/exo-discord/ doctor
 
 changelog: ## Generate changelog from conventional commits
-	@command -v git-cliff > /dev/null 2>&1 && git-cliff -o CHANGELOG.md || echo "install git-cliff: cargo install git-cliff"
+	@mkdir -p docs
+	@command -v git-cliff > /dev/null 2>&1 && git-cliff -o docs/CHANGELOG.md || echo "install git-cliff: cargo install git-cliff"
 
 hooks: ## Install git hooks
 	@if [ -d .git ]; then cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo "pre-commit hook installed"; else echo "no .git directory found"; fi

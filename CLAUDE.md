@@ -74,7 +74,7 @@ make coverage    - run coverage report
 make run-bot     - run go run ./cmd/exo-discord bot-mode
 make run-mcp     - run go run ./cmd/exo-discord mcp serve
 make doctor      - run go run ./cmd/exo-discord doctor
-make changelog   - run git-cliff -o CHANGELOG.md
+make changelog   - run git-cliff -o docs/CHANGELOG.md
 make hooks       - install scripts/pre-commit
 make clean       - remove binary and coverage output
 ```
