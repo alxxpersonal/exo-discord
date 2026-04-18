@@ -95,6 +95,14 @@ type reactResult struct {
 	OK bool `json:"ok"`
 }
 
+type sendTypingArgs struct {
+	ChannelID string `json:"channel_id" jsonschema:"Discord channel id"`
+}
+
+type sendTypingResult struct {
+	OK bool `json:"ok"`
+}
+
 type setStatusArgs struct {
 	Presence     string `json:"presence" jsonschema:"online, idle, dnd, or invisible"`
 	ActivityType string `json:"activity_type,omitempty" jsonschema:"playing, streaming, listening, watching, competing"`
@@ -325,6 +333,16 @@ func registerSessionTools(server *sdkmcp.Server, session discordpkg.Session) {
 		}
 
 		return nil, reactResult{OK: true}, nil
+	})
+
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "send_typing",
+		Description: "Fire a typing indicator in a Discord channel. The indicator lasts roughly 10 seconds in Discord clients or until the bot sends a message. Call right before composing a long reply so the recipient sees a typing dot.",
+	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, args sendTypingArgs) (*sdkmcp.CallToolResult, sendTypingResult, error) {
+		if err := session.SendTyping(ctx, args.ChannelID); err != nil {
+			return nil, sendTypingResult{}, err
+		}
+		return nil, sendTypingResult{OK: true}, nil
 	})
 
 	sdkmcp.AddTool(server, &sdkmcp.Tool{

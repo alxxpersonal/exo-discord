@@ -23,6 +23,7 @@ type fakeSession struct {
 	historyRequest  discordpkg.HistoryRequest
 	downloadRequest discordpkg.DownloadRequest
 	statusRequest   discordpkg.StatusRequest
+	typingChannelID string
 	guildID         string
 	listMembersReq  discordpkg.ListMembersRequest
 	getMemberReq    discordpkg.GetMemberRequest
@@ -72,6 +73,7 @@ func (e *errorSession) DownloadAttachments(context.Context, discordpkg.DownloadR
 	return nil, e.err
 }
 func (e *errorSession) SetStatus(context.Context, discordpkg.StatusRequest) error { return e.err }
+func (e *errorSession) SendTyping(context.Context, string) error                   { return e.err }
 func (e *errorSession) SubscribeInteractions(discordpkg.InteractionHandler) func() {
 	return func() {}
 }
@@ -182,6 +184,11 @@ func (f *fakeSession) FetchHistory(_ context.Context, req discordpkg.HistoryRequ
 func (f *fakeSession) DownloadAttachments(_ context.Context, req discordpkg.DownloadRequest) ([]discordpkg.DownloadedFile, error) {
 	f.downloadRequest = req
 	return []discordpkg.DownloadedFile{{AttachmentID: "att-1", Path: req.DestinationDir + "/att-1.png"}}, nil
+}
+
+func (f *fakeSession) SendTyping(_ context.Context, channelID string) error {
+	f.typingChannelID = channelID
+	return nil
 }
 
 func (f *fakeSession) SetStatus(_ context.Context, req discordpkg.StatusRequest) error {
@@ -350,7 +357,7 @@ func TestServerListTools(t *testing.T) {
 		t.Fatalf("ListTools() error = %v", err)
 	}
 
-	if got, want := len(result.Tools), 40; got != want {
+	if got, want := len(result.Tools), 41; got != want {
 		t.Fatalf("tool count = %d, want %d", got, want)
 	}
 

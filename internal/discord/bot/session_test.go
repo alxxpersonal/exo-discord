@@ -25,6 +25,7 @@ type fakeClient struct {
 	historyRequest  discord.HistoryRequest
 	downloadRequest discord.DownloadRequest
 	statusRequest   discord.StatusRequest
+	typingChannelID string
 
 	sendResult     discord.SentMessage
 	replyResult    discord.SentMessage
@@ -86,6 +87,11 @@ func (f *fakeClient) DownloadAttachments(_ context.Context, req discord.Download
 
 func (f *fakeClient) SetStatus(_ context.Context, req discord.StatusRequest) error {
 	f.statusRequest = req
+	return nil
+}
+
+func (f *fakeClient) SendTyping(_ context.Context, channelID string) error {
+	f.typingChannelID = channelID
 	return nil
 }
 

@@ -68,6 +68,11 @@ func (s *Session) EditMessage(ctx context.Context, req discord.EditRequest) (dis
 	return s.client.EditMessage(ctx, req)
 }
 
+// SendTyping fires a typing indicator in the given channel.
+func (s *Session) SendTyping(ctx context.Context, channelID string) error {
+	return s.client.SendTyping(ctx, channelID)
+}
+
 // FetchHistory returns normalized Discord channel history.
 func (s *Session) FetchHistory(ctx context.Context, req discord.HistoryRequest) ([]discord.Message, error) {
 	return s.client.FetchHistory(ctx, req)

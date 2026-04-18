@@ -13,6 +13,7 @@ type Session interface {
 	Reply(context.Context, ReplyRequest) (SentMessage, error)
 	React(context.Context, ReactRequest) error
 	EditMessage(context.Context, EditRequest) (SentMessage, error)
+	SendTyping(context.Context, string) error
 	FetchHistory(context.Context, HistoryRequest) ([]Message, error)
 	DownloadAttachments(context.Context, DownloadRequest) ([]DownloadedFile, error)
 	SetStatus(context.Context, StatusRequest) error

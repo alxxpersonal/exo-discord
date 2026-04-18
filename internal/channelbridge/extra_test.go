@@ -91,6 +91,7 @@ func (m *mirrorSession) DownloadAttachments(context.Context, discordpkg.Download
 	return nil, nil
 }
 func (m *mirrorSession) SetStatus(context.Context, discordpkg.StatusRequest) error { return nil }
+func (m *mirrorSession) SendTyping(context.Context, string) error                   { return nil }
 func (m *mirrorSession) SendMessage(_ context.Context, req discordpkg.SendRequest) (discordpkg.SentMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -151,6 +152,7 @@ func (m *blockingMirrorSession) DownloadAttachments(context.Context, discordpkg.
 func (m *blockingMirrorSession) SetStatus(context.Context, discordpkg.StatusRequest) error {
 	return nil
 }
+func (m *blockingMirrorSession) SendTyping(context.Context, string) error { return nil }
 func (m *blockingMirrorSession) SendMessage(_ context.Context, req discordpkg.SendRequest) (discordpkg.SentMessage, error) {
 	m.sendCount.Add(1)
 	return discordpkg.SentMessage{}, nil

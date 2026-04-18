@@ -27,6 +27,7 @@ type Client interface {
 	Reply(context.Context, discord.ReplyRequest) (discord.SentMessage, error)
 	React(context.Context, discord.ReactRequest) error
 	EditMessage(context.Context, discord.EditRequest) (discord.SentMessage, error)
+	SendTyping(context.Context, string) error
 	FetchHistory(context.Context, discord.HistoryRequest) ([]discord.Message, error)
 	DownloadAttachments(context.Context, discord.DownloadRequest) ([]discord.DownloadedFile, error)
 	SetStatus(context.Context, discord.StatusRequest) error
@@ -118,6 +119,16 @@ func (c *DiscordGoClient) SendMessage(ctx context.Context, req discord.SendReque
 		MessageID: sent.ID,
 		Content:   sent.Content,
 	}, nil
+}
+
+// SendTyping fires a typing indicator in the given channel. The indicator
+// lasts for roughly 10 seconds in Discord clients or until the bot sends a
+// message - call it right before composing a long reply.
+func (c *DiscordGoClient) SendTyping(ctx context.Context, channelID string) error {
+	if err := c.session.ChannelTyping(channelID, discordgo.WithContext(ctx)); err != nil {
+		return fmt.Errorf("failed to send typing indicator: %w", err)
+	}
+	return nil
 }
 
 // Reply sends a Discord reply.

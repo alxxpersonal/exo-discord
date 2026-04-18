@@ -146,6 +146,11 @@ func (s *Session) EditMessage(context.Context, discord.EditRequest) (discord.Sen
 	return discord.SentMessage{}, ErrNotSupported
 }
 
+// SendTyping is not supported in user-install mode.
+func (s *Session) SendTyping(context.Context, string) error {
+	return ErrNotSupported
+}
+
 // FetchHistory is not supported in user-install mode.
 func (s *Session) FetchHistory(context.Context, discord.HistoryRequest) ([]discord.Message, error) {
 	return nil, ErrNotSupported

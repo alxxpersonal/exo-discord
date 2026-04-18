@@ -333,3 +333,4 @@ func (o openErrorSession) DownloadAttachments(context.Context, discordpkg.Downlo
 	return nil, nil
 }
 func (o openErrorSession) SetStatus(context.Context, discordpkg.StatusRequest) error { return nil }
+func (o openErrorSession) SendTyping(context.Context, string) error                   { return nil }

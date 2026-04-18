@@ -93,6 +93,10 @@ func (f *fakeSession) DownloadAttachments(_ context.Context, req discordpkg.Down
 	return nil, nil
 }
 
+func (f *fakeSession) SendTyping(context.Context, string) error {
+	return nil
+}
+
 func (f *fakeSession) SetStatus(_ context.Context, req discordpkg.StatusRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
