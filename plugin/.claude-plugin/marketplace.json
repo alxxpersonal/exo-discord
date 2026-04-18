@@ -1,0 +1,20 @@
+{
+  "name": "exo-discord-local",
+  "description": "Local development marketplace for the exo-discord channel plugin",
+  "owner": {
+    "name": "alxx",
+    "email": "personal@alxx.dev"
+  },
+  "plugins": [
+    {
+      "name": "exo-discord",
+      "description": "Plug AI agents into Discord. Single Go binary with MCP server, CLI control, and audit log.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "alxx",
+        "email": "personal@alxx.dev"
+      }
+    }
+  ]
+}
