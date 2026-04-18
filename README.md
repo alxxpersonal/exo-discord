@@ -10,7 +10,7 @@ Exo Discord is a Go CLI that turns any directory into a live Discord agent works
 
 ## Quickstart
 
-Requires [Go 1.23+](https://go.dev/dl/).
+Requires [Go 1.25+](https://go.dev/dl/).
 
 ```bash
 # Install from a tagged release
@@ -21,6 +21,8 @@ git clone https://github.com/alxxpersonal/exo-discord.git
 cd exo-discord
 make install-bin
 ```
+
+> Note: until this repo is flipped public on GitHub, `go install` requires `GOPRIVATE=github.com/alxxpersonal/exo-discord` plus working git auth (https token or ssh) for github.com. Once public, no extra setup is needed.
 
 ```bash
 exo-discord init                              # generate .exo-discord starter config
