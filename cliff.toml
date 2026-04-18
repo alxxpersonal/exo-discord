@@ -29,10 +29,12 @@ split_commits = false
 commit_parsers = [
     { message = "^feat", group = "Features" },
     { message = "^fix", group = "Bug Fixes" },
+    { message = "^perf", group = "Performance" },
     { message = "^refactor", group = "Refactoring" },
     { message = "^docs", group = "Documentation" },
+    { message = "^ci", group = "CI" },
     { message = "^infra", group = "Infrastructure" },
     { message = "^test", group = "Testing" },
-    { message = "^chore", group = "Miscellaneous" },
+    { message = "^chore", group = "Chores" },
 ]
 filter_commits = false
