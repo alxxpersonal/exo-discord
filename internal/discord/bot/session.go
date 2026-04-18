@@ -102,7 +102,11 @@ func (s *Session) Subscribe(handler discord.InboundHandler) func() {
 // --- Message Helpers ---
 
 func (s *Session) handleRawMessage(ctx context.Context, raw discord.RawMessageEvent) {
-	if raw.AuthorBot || raw.WebhookID != "" {
+	// Always drop our own bot's echoes (to avoid reply loops) and webhook
+	// messages (which have no real author to evaluate). Other bots fall
+	// through to the access layer, which allowlists them via
+	// allowed_user_ids the same way human accounts are filtered.
+	if raw.AuthorID == s.client.BotUserID() || raw.WebhookID != "" {
 		return
 	}
 
