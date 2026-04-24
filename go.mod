@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/fsnotify/fsnotify v1.8.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gorilla/websocket v1.4.2
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/pelletier/go-toml/v2 v2.3.0
